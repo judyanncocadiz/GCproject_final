@@ -1,0 +1,50 @@
+#construct grange of chr lengths used to filter out out-of-bounds ranges
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+chr.lengths <- seqlengths(txdb)
+chr.gr <- GRanges(seqnames = names(chr.lengths), IRanges(rep(1, length(chr.lengths)), chr.lengths))
+
+# Note throughout this function I had filtered out ranges with no strand info. Can't remember why I did this, and it doesn't work for random regions, so I have removed that from the function. Noting now in case it actually was important!
+range_to_string <- function(sample, chr.gr){
+  print("Converting up regions")
+  up.regions <- readRDS(paste0(output, "/degraded_regions/", sample, ".short.up.gr.RDS"))
+  filt.upstream <- subsetByOverlaps(up.regions, chr.gr, type="within") # ensures strands are in range
+  up.strings <- getSeq(Hsapiens, filt.upstream)
+  rm(filt.upstream)
+  rm(up.regions)
+  
+  print("Converting down regions")
+  down.regions <-  readRDS(paste0(output, "/degraded_regions/", sample, ".short.down.gr.RDS"))
+  filt.downstream <- subsetByOverlaps(down.regions, chr.gr, type="within")
+  down.strings <- getSeq(Hsapiens, filt.downstream)
+  rm(filt.downstream)
+  rm(down.regions)
+  
+  short.strings <- c(up.strings, down.strings)
+  rm(up.strings)
+  rm(down.strings)
+  saveRDS(short.strings, paste0(output, "/strings/", sample, ".short.DNAstrings.RDS"))
+  writeXStringSet(short.strings,
+                  filepath = paste0(output, "/fastas/", sample, ".short.fa"),
+                  format = "fasta")
+  rm(short.strings)
+
+  print("Converting start regions")
+  start.regions <- readRDS(paste0(output, "/degraded_regions/", sample, ".long.start.gr.RDS"))
+  start.strings <- getSeq(Hsapiens, start.regions)
+  rm(start.regions)
+  
+  print("Converting end regions")
+  end.regions <-  readRDS(paste0(output, "/degraded_regions/", sample, ".long.end.gr.RDS"))
+  end.strings <- getSeq(Hsapiens, end.regions)
+  rm(end.regions)
+  
+  long.strings <- c(start.strings, end.strings)
+  rm(start.strings)
+  rm(end.strings)
+
+  saveRDS(long.strings, paste0(output, "/strings/", sample, ".long.DNAstrings.RDS"))
+  writeXStringSet(long.strings,
+                  filepath = paste0(output, "/fastas/", sample, ".long.fa"),
+                  format = "fasta")
+  rm(long.strings)
+}

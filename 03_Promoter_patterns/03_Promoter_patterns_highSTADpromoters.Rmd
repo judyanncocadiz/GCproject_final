@@ -1,0 +1,676 @@
+---
+title: "03_Promoter_patterns_highSTADpromoters"
+author: "Judy Ann Cocadiz"
+date: "2023-07-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Summarising -- High in STAD Promoters
+```{r summarise promoter counts}
+
+bp.distance <- c(-5750, -5250, -4750, -4250, -3750, -3250, -2750, -2250, -1750, -1250, -750, -250,
+  250, 750, 1250, 1750, 2250, 2750, 3250, 3750, 4250, 4750, 5250, 5750)
+```
+
+
+It would be interesting to see if ATACseq scores show the same pattern if treated the same way. Can't remember how big ATACseq bins are, should double check
+
+# Clustering
+Clustering into 2 groups, hopefully open/closed promoters, where open promoters have increased ratio at TSS and closed promoters are more flat. Testing several approaches on how to categorise open vs closed
+ - By high ratio
+  - Tests which cluster has the higher ratio. Higher ratio cluster gets assigned as "open"
+ - By proportion
+  - tests which cluster has an increased ratio at the TSS compared to the edge - higher center = open
+  - not sure how well this works
+ - By smaller quantity
+  - In general, you would expect a smaller number of genes in a sample to be "open" than "closed",
+  - This just assigns the cluster with the smaller number of genes as "open"
+  
+Note from the future: All of these assume that kmeans is clustering into open/closed based on the increased ratio at the TSS. I now believe that the clustering is based on other factors including copy number changes.
+Looking at the frag patterns of individual promoters, I believe that most individual regions do not have enough coverage to show any pattern, so clustering in this way is probably not useful.
+
+To do: remove chr6 MHC region, see what happens.
+  
+
+## By ratio
+```{r cluster promoters}
+#function clusters promoters, and returns a vector of the ids of open promoters
+
+get_open_genes_by_high_ratio <- function(id, df){
+  df.scaled <- scale(df)
+  set.seed(100)
+  clusters <- kmeans(df.scaled, centers = 2, nstart = 30)
+  png(file=paste0(output, "/promoter_patterns/plots/high_stad/visualise_clusters_with_fviz/", id, ".png"))
+  p <- fviz_cluster(clusters, data = df.scaled)
+  print(p)
+  dev.off()
+  #separate into open/closed
+  # open should be have higher ratio  (in theory)
+  cl.means <-  rowMeans(clusters$centers)
+  open.cl <- ifelse(cl.means[1] > cl.means[2], 1, 2)
+  open.cl <- unname(open.cl)
+  open.promoters <- which(clusters$cluster == open.cl)
+  open.promoters <- names(open.promoters)
+}
+
+```
+
+## By proportion
+also trying to separate clusters by the shape of the graph
+(ie. high ratio @ transcription start site, low ratio at edges for "open" promoters)
+
+```{r}
+get_open_genes_by_proportion <- function(id, df){
+  df.scaled <- scale(df)
+  set.seed(100)
+  clusters <- kmeans(df.scaled, centers = 2, nstart = 30)
+  
+  #separate into open/closed
+
+  cl1 <- tibble(position = bp.distance, cluster_center = clusters$centers[1,])
+  
+  cl1_pl <- ggplot(cl1, aes(position, cluster_center)) +
+    geom_line() +
+    ggtitle(id)
+  
+  ggsave(paste0(output, "/promoter_patterns/plots/high_stad/cluster_plots/", id, ".cluster1.png"),
+         plot = cl1_pl, device = "png")
+
+  cl2 <- tibble(position = bp.distance, cluster_center = clusters$centers[2,])
+  cl2_pl <- ggplot(cl2, aes(position, cluster_center)) +
+    geom_line() +
+    ggtitle(id)
+    
+  ggsave(paste0(output, "/promoter_patterns/plots/high_stad/cluster_plots/", id, ".cluster2.png"),
+         plot = cl2_pl, device = "png")
+  
+  edge1 <- mean(c(clusters$centers[1,1], clusters$centers[1,24]))
+  middle1 <- mean(c(clusters$centers[1,12], clusters$centers[1,13]))
+  diff1 <- middle1-edge1
+
+  edge2 <- mean(c(clusters$centers[2,1], clusters$centers[2,24]))
+  middle2 <- mean(c(clusters$centers[2,12], clusters$centers[2,13]))
+  diff2 <- middle2-edge2
+
+  open.cl <- ifelse(diff1 > diff2, 1, 2)
+  
+  open.cl <- unname(open.cl)
+  open.promoters <- which(clusters$cluster == open.cl)
+  open.promoters <- names(open.promoters)
+}
+
+
+```
+
+
+## Smallest Quantity
+You would expect there to a smaller amount of "open" vs "closed" promoters
+```{r}
+get_open_genes_by_smallest_quant <- function(id, df){
+  df.scaled <- scale(df)
+  set.seed(100)
+  clusters <- kmeans(df.scaled, centers = 2, nstart = 30)
+  cl1_number <- which(clusters$cluster == 1) %>% length()
+  cl2_number <- which(clusters$cluster == 2) %>% length()
+  
+  open.cl <- ifelse(cl1_number < cl2_number, 1, 2)
+  open.cl <- unname(open.cl)
+  open.promoters <- which(clusters$cluster == open.cl)
+  open.promoters <- names(open.promoters)
+}
+```
+
+```{r}
+# All work but come up with warning Quick-TRANSfer stage steps exceeded maximum (= 881250)
+# this might not be good - maybe  a memory issue? will run again when server is less busy.
+# Used high STAD promoters for these
+
+for(i in all_samples){
+  print(i)
+  df <- readRDS(paste0(output, "/promoter_patterns/pro_counts/high_in_stad/", i, ".RDS"))
+  open_genes <- get_open_genes_by_high_ratio(i, df)
+  write_lines(open_genes, paste0(output, "/promoter_patterns/potential_open_genes/high_stad/byratio/", i, "byratio.txt"))
+}
+
+
+for(i in all_samples){
+  print(i)
+  df <- readRDS(paste0(output, "/promoter_patterns/pro_counts/high_in_stad/", i, ".RDS"))
+  open_genes <- get_open_genes_by_proportion(i, df)
+  write_lines(open_genes, paste0(output, "/promoter_patterns/potential_open_genes/high_stad/byprop/", i, "byprop.txt"))
+}
+
+
+for(i in all_samples){
+  print(i)
+  df <- readRDS(paste0(output, "/promoter_patterns/pro_counts/high_in_stad/", i, ".RDS"))
+  open_genes <- get_open_genes_by_smallest_quant(i, df)
+  write_lines(open_genes, paste0(output, "/promoter_patterns/potential_open_genes/high_stad/byquant/", i, ".byquant.txt"))
+}
+
+```
+
+
+
+# Analyse "open" genes
+
+## high ratio
+
+```{r}
+all_open_genes <- vector("list", length(all_samples))
+count <- 1
+for(i in all_samples){
+  sample_open_genes <- read_lines(paste0(output,
+                                       "/promoter_patterns/potential_open_genes/high_stad/byratio/",
+                                       i, "byratio.txt"))
+  all_open_genes[[count]] <- sample_open_genes
+  names(all_open_genes)[count] <- i
+  count <- count +1
+}
+
+
+```
+
+
+```{r}
+
+high_gc_open_genes <- all_open_genes[which(sample_info$group == "high_gc")]
+low_gc_open_genes <- all_open_genes[which(sample_info$group == "low_gc")]
+delfi_gc_open_genes <- all_open_genes[which(sample_info$group == "delfi_gc")]
+healthy_open_genes <- all_open_genes[which(sample_info$group == "healthy")]
+
+
+sorted_high_gc <- unlist(high_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_low_gc <- unlist(low_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_delfi_gc <- unlist(delfi_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_healthy <- unlist(healthy_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+
+n_high_gc_samples <- which(sample_info$group == "high_gc") %>% length()
+n_low_gc_samples <- which(sample_info$group == "low_gc") %>% length()
+n_delfi_gc_samples  <- which(sample_info$group == "delfi_gc") %>% length()
+n_healthy_samples <-  which(sample_info$group == "healthy") %>% length()
+
+
+
+```
+
+```{r}
+sorted_all_open_genes <- unlist(all_open_genes) %>% table() %>% sort(decreasing = TRUE)
+prmtrs_to_test <- names(sorted_all_open_genes[sorted_all_open_genes > 3])
+
+```
+
+
+
+```{r}
+prmtr_yes_no <- vector("list", length(prmtrs_to_test))
+count <- 1
+for(i in prmtrs_to_test){
+  high_gc_count <- sorted_high_gc[which(names(sorted_high_gc) == i)]
+  high_gc_count <- ifelse(length(high_gc_count) > 0, high_gc_count, 0)
+  low_gc_count <- sorted_low_gc[which(names(sorted_low_gc) == i)]
+  low_gc_count <- ifelse(length(low_gc_count) > 0, low_gc_count, 0)
+  delfi_gc_count <- sorted_delfi_gc[which(names(sorted_delfi_gc) == i)]
+  delfi_gc_count <- ifelse(length(delfi_gc_count) > 0, delfi_gc_count, 0)
+  healthy_count <- sorted_healthy[which(names(sorted_healthy) == i)]
+  healthy_count <- ifelse(length(healthy_count) > 0, healthy_count, 0)
+  
+  yes.list <- c(high_gc_count,
+                low_gc_count,
+                delfi_gc_count,
+                healthy_count)
+ 
+  no.list <- c(n_high_gc_samples - high_gc_count,
+               n_low_gc_samples - low_gc_count,
+               n_delfi_gc_samples - delfi_gc_count,
+               n_healthy_samples - healthy_count)
+  
+  prmtr_yes_no[[count]] <- tibble(yes = yes.list, no = no.list) %>% as.matrix()
+  rownames(prmtr_yes_no[[count]]) <- c("high_gc", "low_gc", "delfi_gc", "healthy")
+  names(prmtr_yes_no)[count] <- i
+  
+  count <- count + 1
+}
+
+```
+
+```{r}
+
+results <- tibble(gene = NA, p.value = NA)
+for(i in 1:length(prmtr_yes_no)){
+  gene <- names(prmtr_yes_no)[i]
+  data <- prmtr_yes_no[[i]]
+  test <- chisq.test(data)
+  gene.results <- tibble(gene = gene, p.value = test$p.value)
+  results <- bind_rows(results, gene.results)
+}
+results <- results[-1,]
+p.adj <- p.adjust(results$p.value, method = p.adjust.methods, n =length(results$p.value))
+results <- mutate(results, p.adj = p.adj)
+
+sig_results <- results[results$p.adj < 0.05,]$gene
+sig_results
+write_lines(sig_results, paste0(output, "/promoter_patterns/high_gc_sig_open_genes/high_stad/high_gc_sig_open_genes_byratio.txt"))
+output
+prmtr_yes_no[names(prmtr_yes_no) %in% sig_results]
+
+healthy_enriched <- sig_results[1:length(sig_results)]
+stad_enriched <- sig_results[c(1)]
+
+```
+
+
+Write out enriched genes and get counts. Check if counts differ between BRCA and COAD in BRCA enriched genes.
+
+
+Take genes and convert to a tsv file that can be used to create a phenogram using http://visualization.ritchielab.org/phenograms/plot
+Remember to set to hg19.
+To make colours the same on the graph/remove legend change "phenotype" column so that all values are the same.
+
+
+```{r}
+genes_to_phenogram_bm <- function(gene_list){
+  mart <- useMart("ensembl")
+  ds <- useDataset(dataset = "hsapiens_gene_ensembl", mart = mart)
+  getBM(attributes = c("chromosome_name", "start_position",
+                     "end_position", "ensembl_gene_id", "hgnc_symbol"),
+        filters ="hgnc_symbol",
+        values = gene_list,
+        mart = ds) -> bm
+  print(bm)
+  bm2 <- bm %>% filter(substr(chromosome_name, 1,3) != "CHR") %>%
+  mutate(seqnames = paste0("chr", chromosome_name),
+         start = start_position,
+         end = end_position) %>%
+  dplyr::select(-c("chromosome_name", "start_position",
+                   "end_position", "ensembl_gene_id")) %>%
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+  
+  # convert to hg19
+  ch.path <- system.file(package = "liftOver", "extdata", "hg38ToHg19.over.chain")
+  ch <- import.chain(ch.path)
+  bm2 <- unlist(liftOver(bm2, ch))
+  bm2 <- bm2[!duplicated(bm2$hgnc_symbol)]
+  
+  phen_table <- as_tibble(bm2) %>%
+  mutate(seqnames = as.character(seqnames),
+         chr = str_sub(seqnames, 4, nchar(seqnames))) %>%
+  dplyr::select(c(chr, start, hgnc_symbol))
+  colnames(phen_table) <- c("chrom", "pos", "phenotype")
+  return(phen_table)
+}
+```
+
+
+```{r}
+
+stad_enriched_genes_by_ratio <- genes_to_phenogram_bm(stad_enriched) # sometimes can't connect, just wait a few hours and try again.
+
+write_tsv(stad_enriched_genes_by_ratio,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/high_stad/stad_enriched_by_ratio.tsv"))
+length(healthy_enriched)
+
+healthy_enriched_genes_by_ratio <- genes_to_phenogram_bm(healthy_enriched)
+
+nrow(healthy_enriched_genes_by_ratio)
+write_tsv(healthy_enriched_genes_by_ratio,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/high_stad/healthy_enriched_by_ratio.tsv"))
+
+
+cat(healthy_enriched)
+```
+
+
+# Analyse "open" genes
+
+## high prop
+
+```{r}
+all_open_genes <- vector("list", length(all_samples))
+count <- 1
+for(i in all_samples){
+  sample_open_genes <- read_lines(paste0(output,
+                                       "/promoter_patterns/potential_open_genes/high_stad/byprop/",
+                                       i, "byprop.txt"))
+  all_open_genes[[count]] <- sample_open_genes
+  names(all_open_genes)[count] <- i
+  count <- count +1
+}
+
+
+```
+
+
+```{r}
+
+high_gc_open_genes <- all_open_genes[which(sample_info$group == "high_gc")]
+low_gc_open_genes <- all_open_genes[which(sample_info$group == "low_gc")]
+delfi_gc_open_genes <- all_open_genes[which(sample_info$group == "delfi_gc")]
+healthy_open_genes <- all_open_genes[which(sample_info$group == "healthy")]
+
+
+sorted_high_gc <- unlist(high_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_low_gc <- unlist(low_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_delfi_gc <- unlist(delfi_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_healthy <- unlist(healthy_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+
+n_high_gc_samples <- which(sample_info$group == "high_gc") %>% length()
+n_low_gc_samples <- which(sample_info$group == "low_gc") %>% length()
+n_delfi_gc_samples  <- which(sample_info$group == "delfi_gc") %>% length()
+n_healthy_samples <-  which(sample_info$group == "healthy") %>% length()
+
+
+
+```
+
+```{r}
+sorted_all_open_genes <- unlist(all_open_genes) %>% table() %>% sort(decreasing = TRUE)
+prmtrs_to_test <- names(sorted_all_open_genes[sorted_all_open_genes > 3])
+
+```
+
+
+
+```{r}
+prmtr_yes_no <- vector("list", length(prmtrs_to_test))
+count <- 1
+for(i in prmtrs_to_test){
+  high_gc_count <- sorted_high_gc[which(names(sorted_high_gc) == i)]
+  high_gc_count <- ifelse(length(high_gc_count) > 0, high_gc_count, 0)
+  low_gc_count <- sorted_low_gc[which(names(sorted_low_gc) == i)]
+  low_gc_count <- ifelse(length(low_gc_count) > 0, low_gc_count, 0)
+  delfi_gc_count <- sorted_delfi_gc[which(names(sorted_delfi_gc) == i)]
+  delfi_gc_count <- ifelse(length(delfi_gc_count) > 0, delfi_gc_count, 0)
+  healthy_count <- sorted_healthy[which(names(sorted_healthy) == i)]
+  healthy_count <- ifelse(length(healthy_count) > 0, healthy_count, 0)
+  
+  yes.list <- c(high_gc_count,
+                low_gc_count,
+                delfi_gc_count,
+                healthy_count)
+ 
+  no.list <- c(n_high_gc_samples - high_gc_count,
+               n_low_gc_samples - low_gc_count,
+               n_delfi_gc_samples - delfi_gc_count,
+               n_healthy_samples - healthy_count)
+  
+  prmtr_yes_no[[count]] <- tibble(yes = yes.list, no = no.list) %>% as.matrix()
+  rownames(prmtr_yes_no[[count]]) <- c("high_gc", "low_gc", "delfi_gc", "healthy")
+  names(prmtr_yes_no)[count] <- i
+  
+  count <- count + 1
+}
+
+```
+
+```{r}
+
+results <- tibble(gene = NA, p.value = NA)
+for(i in 1:length(prmtr_yes_no)){
+  gene <- names(prmtr_yes_no)[i]
+  data <- prmtr_yes_no[[i]]
+  test <- chisq.test(data)
+  gene.results <- tibble(gene = gene, p.value = test$p.value)
+  results <- bind_rows(results, gene.results)
+}
+results <- results[-1,]
+results
+p.adj <- p.adjust(results$p.value, method = p.adjust.methods, n =length(results$p.value))
+results <- mutate(results, p.adj = p.adj)
+results
+
+sig_results <- results[results$p.value < 0.05,]$gene
+sig_results
+write_lines(sig_results, paste0(output, "/promoter_patterns/high_gc_sig_open_genes/high_stad/high_gc_sig_open_genes_byprop.txt"))
+prmtr_yes_no[names(prmtr_yes_no) %in% sig_results]
+
+healthy_enriched <- sig_results[c(1)]
+stad_enriched <- sig_results[1:length(sig_results)]
+
+
+```
+Write out enriched genes and get counts. Check if counts differ between BRCA and COAD in BRCA enriched genes.
+
+
+Take genes and convert to a tsv file that can be used to create a phenogram using http://visualization.ritchielab.org/phenograms/plot
+Remember to set to hg19.
+To make colours the same on the graph/remove legend change "phenotype" column so that all values are the same.
+
+
+```{r}
+genes_to_phenogram_bm <- function(gene_list){
+  mart <- useMart("ensembl")
+  ds <- useDataset(dataset = "hsapiens_gene_ensembl", mart = mart)
+  getBM(attributes = c("chromosome_name", "start_position",
+                     "end_position", "ensembl_gene_id", "hgnc_symbol"),
+        filters ="hgnc_symbol",
+        values = gene_list,
+        mart = ds) -> bm
+  print(bm)
+  bm2 <- bm %>% filter(substr(chromosome_name, 1,3) != "CHR") %>%
+  mutate(seqnames = paste0("chr", chromosome_name),
+         start = start_position,
+         end = end_position) %>%
+  dplyr::select(-c("chromosome_name", "start_position",
+                   "end_position", "ensembl_gene_id")) %>%
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+  
+  # convert to hg19
+  ch.path <- system.file(package = "liftOver", "extdata", "hg38ToHg19.over.chain")
+  ch <- import.chain(ch.path)
+  bm2 <- unlist(liftOver(bm2, ch))
+  bm2 <- bm2[!duplicated(bm2$hgnc_symbol)]
+  
+  phen_table <- as_tibble(bm2) %>%
+  mutate(seqnames = as.character(seqnames),
+         chr = str_sub(seqnames, 4, nchar(seqnames))) %>%
+  dplyr::select(c(chr, start, hgnc_symbol))
+  colnames(phen_table) <- c("chrom", "pos", "phenotype")
+  return(phen_table)
+}
+```
+
+
+```{r}
+
+stad_enriched_genes_by_prop <- genes_to_phenogram_bm(stad_enriched) # sometimes can't connect, just wait a few hours and try again.
+
+write_tsv(stad_enriched_genes_by_prop,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/high_stad/stad_enriched_by_prop.tsv"))
+length(healthy_enriched)
+
+healthy_enriched_genes_by_ratio <- genes_to_phenogram_bm(healthy_enriched)
+
+nrow(healthy_enriched_genes_by_ratio)
+write_tsv(healthy_enriched_genes_by_ratio,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/high_stad/healthy_enriched_by_prop.tsv"))
+
+
+cat(healthy_enriched)
+```
+
+
+# Analyse "open" genes
+
+## high quant
+
+```{r}
+all_open_genes <- vector("list", length(all_samples))
+count <- 1
+for(i in all_samples){
+  sample_open_genes <- read_lines(paste0(output,
+                                       "/promoter_patterns/potential_open_genes/high_stad/byquant/", i, ".byquant.txt"))
+  all_open_genes[[count]] <- sample_open_genes
+  names(all_open_genes)[count] <- i
+  count <- count +1
+}
+
+
+```
+
+
+```{r}
+
+high_gc_open_genes <- all_open_genes[which(sample_info$group == "high_gc")]
+low_gc_open_genes <- all_open_genes[which(sample_info$group == "low_gc")]
+delfi_gc_open_genes <- all_open_genes[which(sample_info$group == "delfi_gc")]
+healthy_open_genes <- all_open_genes[which(sample_info$group == "healthy")]
+
+
+sorted_high_gc <- unlist(high_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_low_gc <- unlist(low_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_delfi_gc <- unlist(delfi_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_healthy <- unlist(healthy_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+
+n_high_gc_samples <- which(sample_info$group == "high_gc") %>% length()
+n_low_gc_samples <- which(sample_info$group == "low_gc") %>% length()
+n_delfi_gc_samples  <- which(sample_info$group == "delfi_gc") %>% length()
+n_healthy_samples <-  which(sample_info$group == "healthy") %>% length()
+
+
+
+```
+
+```{r}
+sorted_all_open_genes <- unlist(all_open_genes) %>% table() %>% sort(decreasing = TRUE)
+prmtrs_to_test <- names(sorted_all_open_genes[sorted_all_open_genes > 3])
+
+```
+
+
+
+```{r}
+prmtr_yes_no <- vector("list", length(prmtrs_to_test))
+count <- 1
+for(i in prmtrs_to_test){
+  high_gc_count <- sorted_high_gc[which(names(sorted_high_gc) == i)]
+  high_gc_count <- ifelse(length(high_gc_count) > 0, high_gc_count, 0)
+  low_gc_count <- sorted_low_gc[which(names(sorted_low_gc) == i)]
+  low_gc_count <- ifelse(length(low_gc_count) > 0, low_gc_count, 0)
+  delfi_gc_count <- sorted_delfi_gc[which(names(sorted_delfi_gc) == i)]
+  delfi_gc_count <- ifelse(length(delfi_gc_count) > 0, delfi_gc_count, 0)
+  healthy_count <- sorted_healthy[which(names(sorted_healthy) == i)]
+  healthy_count <- ifelse(length(healthy_count) > 0, healthy_count, 0)
+  
+  yes.list <- c(high_gc_count,
+                low_gc_count,
+                delfi_gc_count,
+                healthy_count)
+ 
+  no.list <- c(n_high_gc_samples - high_gc_count,
+               n_low_gc_samples - low_gc_count,
+               n_delfi_gc_samples - delfi_gc_count,
+               n_healthy_samples - healthy_count)
+  
+  prmtr_yes_no[[count]] <- tibble(yes = yes.list, no = no.list) %>% as.matrix()
+  rownames(prmtr_yes_no[[count]]) <- c("high_gc", "low_gc", "delfi_gc", "healthy")
+  names(prmtr_yes_no)[count] <- i
+  
+  count <- count + 1
+}
+
+```
+
+```{r}
+
+results <- tibble(gene = NA, p.value = NA)
+for(i in 1:length(prmtr_yes_no)){
+  gene <- names(prmtr_yes_no)[i]
+  data <- prmtr_yes_no[[i]]
+  test <- chisq.test(data)
+  gene.results <- tibble(gene = gene, p.value = test$p.value)
+  results <- bind_rows(results, gene.results)
+}
+results <- results[-1,]
+results
+p.adj <- p.adjust(results$p.value, method = p.adjust.methods, n =length(results$p.value))
+results <- mutate(results, p.adj = p.adj)
+results
+
+sig_results <- results[results$p.adj < 0.05,]$gene
+sig_results
+write_lines(sig_results, paste0(output, "/promoter_patterns/high_gc_sig_open_genes/high_stad/high_gc_sig_open_genes_byquant.txt"))
+prmtr_yes_no[names(prmtr_yes_no) %in% sig_results]
+
+healthy_enriched <- sig_results[1:length(sig_results)]
+stad_enriched <- sig_results[1:length(sig_results)]
+
+
+```
+Write out enriched genes and get counts. Check if counts differ between BRCA and COAD in BRCA enriched genes.
+
+
+Take genes and convert to a tsv file that can be used to create a phenogram using http://visualization.ritchielab.org/phenograms/plot
+Remember to set to hg19.
+To make colours the same on the graph/remove legend change "phenotype" column so that all values are the same.
+
+
+```{r}
+genes_to_phenogram_bm <- function(gene_list){
+  mart <- useMart("ensembl")
+  ds <- useDataset(dataset = "hsapiens_gene_ensembl", mart = mart)
+  getBM(attributes = c("chromosome_name", "start_position",
+                     "end_position", "ensembl_gene_id", "hgnc_symbol"),
+        filters ="hgnc_symbol",
+        values = gene_list,
+        mart = ds) -> bm
+  print(bm)
+  bm2 <- bm %>% filter(substr(chromosome_name, 1,3) != "CHR") %>%
+  mutate(seqnames = paste0("chr", chromosome_name),
+         start = start_position,
+         end = end_position) %>%
+  dplyr::select(-c("chromosome_name", "start_position",
+                   "end_position", "ensembl_gene_id")) %>%
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+  
+  # convert to hg19
+  ch.path <- system.file(package = "liftOver", "extdata", "hg38ToHg19.over.chain")
+  ch <- import.chain(ch.path)
+  bm2 <- unlist(liftOver(bm2, ch))
+  bm2 <- bm2[!duplicated(bm2$hgnc_symbol)]
+  
+  phen_table <- as_tibble(bm2) %>%
+  mutate(seqnames = as.character(seqnames),
+         chr = str_sub(seqnames, 4, nchar(seqnames))) %>%
+  dplyr::select(c(chr, start, hgnc_symbol))
+  colnames(phen_table) <- c("chrom", "pos", "phenotype")
+  return(phen_table)
+}
+```
+
+
+```{r}
+
+stad_enriched_genes_by_prop <- genes_to_phenogram_bm(stad_enriched) # sometimes can't connect, just wait a few hours and try again.
+
+write_tsv(stad_enriched_genes_by_prop,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/high_stad/stad_enriched_by_quant.tsv"))
+length(healthy_enriched)
+
+healthy_enriched_genes_by_ratio <- genes_to_phenogram_bm(healthy_enriched)
+
+nrow(healthy_enriched_genes_by_ratio)
+write_tsv(healthy_enriched_genes_by_ratio,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/high_stad/healthy_enriched_by_quant.tsv"))
+
+
+cat(healthy_enriched)
+```
+

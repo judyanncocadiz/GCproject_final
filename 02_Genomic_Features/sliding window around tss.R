@@ -1,0 +1,91 @@
+# Windows surrounding TSSs
+
+```{r prep windows gr, eval = FALSE}
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+#need to trim all ranges that will end up out of bounds when window shifts
+window <- promoters(txdb, upstream = 2000, downstream = 0)
+chrms <- paste0("chr", 1:22)
+window <- window[seqnames(window) %in% chrms]
+window <- shift(window, 10000) %>% trim(use.names = TRUE)
+window <- shift(window, -10000)
+
+upstream_points <- seq(-2000, 10000, 1000)
+upstream_position <- -2000
+downstream_position <- 0
+window_region <- paste0(upstream_position, "to", downstream_position)
+
+for(i in 1:length(upstream_points)){
+  window_percents <-  compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = window)
+  saveRDS(window_percents, paste0(output, "/windows_rds/", window_region, "_bp_around_TSS.RDS"))
+  upstream_position <- upstream_position + 1000
+  downstream_position <- downstream_position + 1000
+  window_region <- paste0(upstream_position, "to", downstream_position)
+  window <- shift(window, 1000) %>% trim(use.names = TRUE)
+}
+
+```
+
+
+```{r}
+upstream_points <- seq(-2000, 10000, 1000)
+
+for(upstream in upstream_points){
+  filename <- paste0(upstream, "to", 2000 + upstream, "_bp_around_TSS.RDS")
+  window_percents <- readRDS(paste0(output, "/windows_rds/", filename))
+  window_percents <- window_percents %>%
+    pivot_longer(cols = c(percent_shorts_in_gf,
+                          percent_longs_in_gf),
+                 names_to = "short.or.long",
+                 values_to = "percent_of_fragments_overlapping_window")
+  
+  ggplot(window_percents, aes(x = short.or.long,
+                              y= percent_of_fragments_overlapping_window,
+                              color = sample)) +
+    geom_point() +
+    geom_line(aes(group = sample)) +
+    scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+    scale_y_continuous(name = "% of fragments overlapping window") +
+    theme_bw() +
+    theme(legend.position = "none") +
+    ggtitle(paste(upstream, "to", 2000 + upstream, "bp around TSS"))
+  
+  ggsave(filename = paste0(output, "/plots4/windows_for_pres2/", upstream, "to", 2000 + upstream, ".png"), device = "png")
+  
+  window <- window_percents %>%
+    mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                             substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                             substr(sample,1,1) == "P" ~ "delfi_gc",
+                             substr(sample,1,1) == "E" ~ "healthy"))
+  
+  ggplot(window, aes(x=short.or.long,y=percent_of_fragments_overlapping_window)) +
+    geom_point(aes(color = sample)) +
+    geom_line(aes(group = sample, color = sample)) +
+    facet_wrap(~group, nrow = 1) +
+    scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+    scale_y_continuous(name = "% of fragments overlapping window") +
+    theme_bw() +
+    theme(legend.position = "none") +
+    ggtitle(paste(upstream, "to", 2000 + upstream, "bp around TSS"))
+  
+  ggsave(filename = paste0(output, "/plots4/windows_for_pres2/", upstream, "to", 2000 + upstream, "_split.png"), device = "png")
+  
+  violin_colors = c("#fcf8b8", "#c39fe3")
+  ggplot(window, aes(x=short.or.long,y=percent_of_fragments_overlapping_window, fill = short.or.long)) +
+    geom_violin() +
+    geom_point() +
+    facet_wrap(~group, nrow = 1) +
+    scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+    scale_y_continuous(name = "% of fragments overlapping window") +
+    theme_bw() +
+    theme(legend.position = "none") +
+    ggtitle(paste(upstream, "to", 2000 + upstream, "bp around TSS")) +
+    scale_fill_manual(values = violin_colors)
+  
+  ggsave(filename = paste0(output, "/plots4/windows_for_pres2/", upstream, "to", 2000 + upstream, "_split_violin.png"), device = "png")
+}
+
+
+```

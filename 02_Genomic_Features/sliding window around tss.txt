@@ -1,0 +1,57 @@
+# Windows surrounding TSSs
+
+```{r prep windows gr, eval = FALSE}
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+#need to trim all ranges that will end up out of bounds when window shifts
+window <- promoters(txdb, upstream = 2000, downstream = 0)
+window <- window[seqnames(window) %in% chrms]
+window <- shift(window, 10000) %>% trim(use.names = TRUE)
+window <- shift(window, -10000)
+
+upstream_points <- seq(-2000, 10000, 1000)
+upstream_position <- -2000
+downstream_position <- 0
+window_region <- paste0(upstream_position, "to", downstream_position)
+
+for(i in 1:length(upstream_points)){
+  window_percents <-  compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = window)
+  saveRDS(window_percents, paste0(output, "/genomic_features/windows_rds/", window_region, "_bp_around_TSS.RDS"))
+  upstream_position <- upstream_position + 1000
+  downstream_position <- downstream_position + 1000
+  window_region <- paste0(upstream_position, "to", downstream_position)
+  window <- shift(window, 1000) %>% trim(use.names = TRUE)
+}
+
+```
+
+
+```{r}
+upstream_points <- seq(-2000, 10000, 1000)
+
+for(upstream in upstream_points){
+  filename <- paste0(upstream, "to", 2000 + upstream, "_bp_around_TSS.RDS")
+  window_percents <- readRDS(paste0(output, "/genomic_features/windows_rds/", filename))
+  window_percents <- window_percents %>%
+    pivot_longer(cols = c(percent_shorts_in_gf,
+                          percent_longs_in_gf),
+                          names_to = "short.or.long",
+                          values_to = "percent_of_fragments_overlapping_window")
+  
+  ggplot(window_percents, aes(x = short.or.long,
+                              y= percent_of_fragments_overlapping_window,
+                              color = sample)) +
+    geom_point() +
+    geom_line(aes(group = sample)) +
+    theme(legend.position = "none") +
+    ggtitle(paste(upstream, "to", 2000 + upstream)) +
+    ylim(c(0, 0.023))
+  
+  ggsave(filename = paste0(output, "/genomic_features/plots/windows_for_pres/", upstream, "to", 2000 + upstream, ".png"),plot = last_plot(), device = "png")
+  
+}
+
+
+```

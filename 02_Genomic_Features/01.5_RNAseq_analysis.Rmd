@@ -1,0 +1,188 @@
+---
+title: "RNAseq analysis"
+author: "Judy Ann Cocadiz"
+date: "2023-06-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The purpose of this analysis is to get a list of genes that have high expression in cancer, and a low expression in healthy tissue and blood. These genes will be used in further analysis to see if highly expressed cancer genes show different frag patterns in cancer vs controls. I want genes with low expression in whole blood as high blood expression may drown out any signal.
+
+I am using TCGA data for GC samples. Counts have been processed to reduce batch effect so they can be directly compared to Gtex data. Unfortunately this was not reproduced with whole blood data, so I am getting that from a different source. Since I am only looking at the largest changes hopefully this won't make too much of an impact on the most differentially expressed genes.
+files downloaded from https://figshare.com/articles/dataset/Data_record_1/5330539?file=9150214
+nature scientific data paper Schultz et al 2018 reprocessed bam files to reduce batch effect
+https://www.nature.com/articles/sdata201861
+Unifying cancer and normal RNA sequencing data from different sources
+
+```{r load libraries}
+library(tidyverse)
+library(edgeR)
+
+```
+
+
+```{r }
+data <- "/Volumes/userdata/student_users/judyanncocadiz/Documents/GCproject_final/data/RNAseq"
+output <- "/Volumes/userdata/student_users/judyanncocadiz/Documents/GCproject_final/output/RNAseq"
+
+```
+
+```{r}
+stad_tumour <- read_tsv(paste0(data, "/stadrsemcounttcgat.txt"))
+stad_normal <- read_tsv(paste0(data, "/stadrsemcounttcga.txt"))
+stomach_gtex <- read_tsv(paste0(data, "/stomachrsemcountgtex.txt"))
+blood <- read_csv(paste0(data, "/gene_reads_2017-06-05_v8_whole_blood.gct.csv"))
+```
+
+
+
+# Merge
+
+ensure each dataset contains each of the genes
+```{r}
+stad_t <- arrange(stad_tumour, Hugo_Symbol)
+stad_m <- arrange(stad_normal, Hugo_Symbol)
+stomach <- arrange(stomach_gtex, Hugo_Symbol)
+whole_blood <- arrange(blood, Description)
+
+stad_t <- stad_t[which(stad_t$Hugo_Symbol %in% whole_blood$Description),]
+stad_m <- stad_m[which(stad_m$Hugo_Symbol %in% whole_blood$Description),]
+stomach <- stomach[which(stomach$Hugo_Symbol %in% whole_blood$Description),]
+whole_blood <- whole_blood[which(whole_blood$Description %in% stad_t$Hugo_Symbol),]
+whole_blood <- whole_blood[!duplicated(whole_blood$Description),] #removing alt transcripts
+
+stad_t_genes <- stad_t[,1:2]
+stad_m_genes <- stad_m[,1:2]
+stomach_genes <- stomach[,1:2]
+wb_genes <- whole_blood[,2:3]
+
+all.equal(wb_genes$Description, stad_t_genes$Hugo_Symbol)
+all.equal(wb_genes$Description, stomach_genes$Hugo_Symbol)
+
+```
+
+
+# Convert to matrix & merge
+
+```{r}
+
+stad_t_counts <- stad_t[,3:ncol(stad_t)] %>% as.matrix()
+stad_m_counts <- stad_m[,3:ncol(stad_m)] %>% as.matrix()
+stomach_counts <- stomach[,3:ncol(stomach)] %>% as.matrix()
+wb_counts <- whole_blood[,4:ncol(whole_blood)] %>% as.matrix()
+
+rownames(stad_m_counts) <- stad_m$Hugo_Symbol
+rownames(stad_t_counts) <- stad_t$Hugo_Symbol
+rownames(stomach_counts) <- stomach$Hugo_Symbol
+rownames(wb_counts) <- whole_blood$Description
+counts <- cbind(stad_t_counts, stad_m_counts,
+                stomach_counts, wb_counts)
+```
+
+# Find genes with low expression in all tissues
+
+Right now, I a taking a random sample of genes with less than 10 counts in all samples to use for further analysis
+However, maybe it would be better to check the genes have high expression in a different tissue to ensure we are not analysing genes that 
+```{r}
+low_exp <- counts[rowMeans(counts) < 10,] %>% rownames() %>% sample(size = 200)
+write_lines(low_exp, paste0(output, "/low_in_stad_and_blood.txt"))
+```
+
+
+## Set up design to find differentially expressed genes
+```{r}
+
+snames <- colnames(counts)
+
+group <- c(rep("stad_sample", ncol(stad_t_counts)),
+           rep("adjacent_stomach_tissue", ncol(stad_m_counts)),
+           rep("stomach", ncol(stomach_counts)),
+           rep("whole_blood", ncol(wb_counts)))
+
+mm <- model.matrix(~0+group)
+
+```
+
+
+
+
+Should change to filter out genes with low expression in all groups.
+
+```{r}
+## Test for differential expression
+#not filtering at the moment
+
+filt_test <- filterByExpr(counts, group = group)
+filt_test
+
+dge <- DGEList(counts=counts, genes = rownames(counts))
+v <- voom(dge, mm, plot = TRUE) #converts reads for linear modelling
+fit <- lmFit(v, mm)
+
+contrast.mm <- makeContrasts(stad_vs_adj_stomach = groupstad_sample-groupadjacent_stomach_tissue,
+                             stad_vs_whole_blood = groupstad_sample-groupwhole_blood,
+                             stad_vs_gtex_stomach = groupstad_sample-groupstomach, levels=mm)
+
+fit2 <- contrasts.fit(fit, contrast.mm)
+fit3 <- eBayes(fit2)
+
+summary(decideTests(fit3))
+
+
+
+```
+
+Results:
+```{r}
+stad_vs_stomach <- topTable(fit3, number = Inf, coef = "stad_vs_adj_stomach")
+stad_vs_stomach %>% arrange(desc(logFC))
+stad_vs_blood <- topTable(fit3, number = Inf, coef = "stad_vs_whole_blood")
+stad_vs_blood %>% arrange(desc(logFC))
+stad_vs_gtex <- topTable(fit3, number = Inf, coef = "stad_vs_gtex_stomach")
+stad_vs_gtex %>% arrange(desc(logFC))
+
+```
+
+I want genes with high expression in stad with low expression in blood and healthy tissue
+So I'm taking the top 500 genes from each comparison (ie the 500 genes with the highest foldchange in disease vs control and disease vs blood) and seeing if there is any overlap.
+Is this the best way to do it? probably not. Does it work? Sure.
+
+```{r}
+# STAD enriched genes (vs adj stomach and blood)
+sig_stad_vs_stomach <- stad_vs_stomach[stad_vs_stomach$adj.P.Val < 0.05,]
+sig_stad_vs_stomach <- stad_vs_stomach %>% arrange(desc(logFC)) %>% head(500)
+sig_stad_vs_blood <- stad_vs_blood[stad_vs_blood$adj.P.Val < 0.05,]
+sig_stad_vs_blood <- stad_vs_blood %>% arrange(desc(logFC)) %>% head(500)
+
+stad_enriched <- sig_stad_vs_blood[sig_stad_vs_blood$genes %in% sig_stad_vs_stomach$genes,]
+stad_enriched %>% nrow() #68
+write_lines(stad_enriched$genes, paste0(output, "/stad_enriched.txt"))
+
+
+# Blood enriched genes  (vs STAD)
+# could consider including normal stomach tissue in this.
+high_blood_v_stad <- stad_vs_blood[stad_vs_blood$adj.P.Val < 0.05,] %>% arrange(logFC) %>% head(500)
+blood_enriched <- high_blood_v_stad[high_blood_v_stad$genes,]
+blood_enriched %>% nrow()
+write_lines(blood_enriched$genes, paste0(output, "/blood_enriched.txt"))
+
+
+# STAD 2 enriched genes (vs gtex stomach, and blood)
+sig_stad_vs_gtex <- stad_vs_gtex[stad_vs_gtex$adj.P.Val < 0.05,]
+sig_stad_vs_gtex <- stad_vs_gtex %>% arrange(desc(logFC)) %>% head(500)
+sig_stad_vs_blood <- stad_vs_blood[stad_vs_blood$adj.P.Val < 0.05,]
+sig_stad_vs_blood <- stad_vs_blood %>% arrange(desc(logFC)) %>% head(500)
+
+stad2_enriched <- sig_stad_vs_blood[sig_stad_vs_blood$genes %in% sig_stad_vs_gtex$genes,]
+stad2_enriched %>% nrow() #68
+write_lines(stad_enriched$genes, paste0(output, "/stad2_enriched.txt"))
+
+
+```
+
+
+
+

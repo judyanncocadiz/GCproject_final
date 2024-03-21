@@ -1,0 +1,510 @@
+---
+title: "Motifs"
+author: "Judy Ann Cocadiz"
+date: "2023-05-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(tidyverse)
+library(regioneR)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(Biostrings)
+library(BSgenome.Hsapiens.UCSC.hg19)
+```
+
+```{r prep samples}
+sample_info <- read_csv("/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/data/bams/all_sample_info2.csv")
+# PGDX13678P1 and PGDX13765P1 are currently producing fasta files with 0B (redo making fasta, without removing *strand)
+# EGAF00002727395, EGAF00002727403, EGAF00002727519, EGAF00002727531, EGAF00002727640, PGDX10349P1, PGDX13770P1, and GC110post are currently getting 'std::bad_alloc' errors (thus no homer output)
+sample_info <- sample_info[-c(2, 14, 24, 32, 37, 38, 43, 57),]
+samples <- sample_info$sample_id
+gr_path <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/output/fragment_profiles/granges"
+output <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/output/motifs"
+samples
+
+```
+
+
+```{r}
+for(i in samples[1:length(samples)]){
+  print(i)
+  gr <- readRDS(paste0(gr_path, "/", i, ".gr.RDS"))
+  short <- gr[which(width(gr) < 150 & width(gr) >= 100),]
+  long <- gr[which(width(gr) > 150 & width(gr) <= 220),]
+  s <- mean(width(short))
+  l <- mean(width(long))
+  degraded.zone <- round(l-s, digits = 0)
+
+  #short, upstream
+  upstream.regions <- resize(short, fix = 'end', width = width(short) + degraded.zone) %>%
+                      resize(fix = 'start', width = degraded.zone)
+  #short, downstream
+  downstream.regions <- resize(short, fix = 'start', width = width(short) + degraded.zone) %>%
+                        resize(fix = 'end', width = degraded.zone)
+
+  #long, start
+  start.regions <- resize(long, fix = 'start', width = degraded.zone)
+
+  #long, end
+  end.regions <- resize(long, fix = 'end', width = degraded.zone)
+  
+  #save
+  saveRDS(upstream.regions, paste0(output, "/degraded_regions/", i, ".short.up.gr.RDS"))
+  saveRDS(downstream.regions, paste0(output, "/degraded_regions/", i, ".short.down.gr.RDS"))
+  saveRDS(start.regions, paste0(output, "/degraded_regions/", i, ".long.start.gr.RDS"))
+  saveRDS(end.regions, paste0(output, "/degraded_regions/", i, ".long.end.gr.RDS"))
+}
+
+
+```
+
+The script below was originally written to find enriched sequences in short fragment ends against a background of long frags.
+Thinking of repeating with:
+* short against random
+* random against random
+* ???short vs 30 bp(approx length of 'degraded region') out from long?
+
+
+```{r repeat, using random genomic regions as a control}
+for(i in samples[1:length(samples)]){
+  print(i)
+  
+  print("up")
+  upstream.regions <- readRDS(paste0(output, "/degraded_regions/", i, ".short.up.gr.RDS"))
+  random.up <- randomizeRegions(upstream.regions, pruning.mode = "coarse")
+  saveRDS(random.up, paste0(output, "/degraded_regions/random.", i, ".short.up.gr.RDS"))
+  rm(upstream.regions)
+  rm(random.up)
+  
+  print("down")
+  downstream.regions <- readRDS(paste0(output, "/degraded_regions/", i, ".short.down.gr.RDS"))
+  random.down <- randomizeRegions(downstream.regions, pruning.mode = "coarse")
+  saveRDS(random.down, paste0(output, "/degraded_regions/random.", i, ".short.down.gr.RDS"))
+  rm(downstream.regions)
+  rm(random.down)
+  
+  print("start")
+  start.regions <- readRDS(paste0(output, "/degraded_regions/", i, ".long.start.gr.RDS"))
+  random.start <- randomizeRegions(start.regions, pruning.mode = "coarse")
+  saveRDS(random.start, paste0(output, "/degraded_regions/random.", i, ".long.start.gr.RDS"))
+  rm(start.regions)
+  rm(random.start)
+  
+  print("end")
+  end.regions <- readRDS(paste0(output, "/degraded_regions/", i, ".long.end.gr.RDS"))
+  random.end <- randomizeRegions(end.regions, pruning.mode = "coarse")
+  saveRDS(random.end, paste0(output, "/degraded_regions/random.", i, ".long.end.gr.RDS"))
+  rm(end.regions)
+  rm(random.end)
+
+}
+
+```
+
+
+
+To find enriched sequences, we need to convert from Grange to DNAstrings and then write out as fasta files.
+
+
+
+```{r GRange to DNAstrings, eval = FALSE}
+#construct grange of chr lengths used to filter out out-of-bounds ranges
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+chr.lengths <- seqlengths(txdb)
+chr.gr <- GRanges(seqnames = names(chr.lengths), IRanges(rep(1, length(chr.lengths)), chr.lengths))
+
+# Note throughout this function I had filtered out ranges with no strand info. Can't remember why I did this, and it doesn't work for random regions, so I have removed that from the function. Noting now in case it actually was important!
+range_to_string <- function(sample, chr.gr){
+  print("Converting up regions")
+  up.regions <- readRDS(paste0(output, "/degraded_regions/", sample, ".short.up.gr.RDS"))
+  filt.upstream <- subsetByOverlaps(up.regions, chr.gr, type="within")# ensures strands are in range
+  #filt.upstream <- filt.upstream[-which(strand(filt.upstream) == "*"),]
+  up.strings <- getSeq(Hsapiens, filt.upstream)
+  rm(filt.upstream)
+  rm(up.regions)
+  
+  print("Converting down regions")
+  down.regions <-  readRDS(paste0(output, "/degraded_regions/", sample, ".short.down.gr.RDS"))
+  filt.downstream <- subsetByOverlaps(down.regions, chr.gr, type="within")
+  #filt.downstream <- filt.downstream[-which(strand(filt.downstream) == "*"),]
+  down.strings <- getSeq(Hsapiens, filt.downstream)
+  rm(filt.downstream)
+  rm(down.regions)
+  
+  short.strings <- c(up.strings, down.strings)
+  rm(up.strings)
+  rm(down.strings)
+  saveRDS(short.strings, paste0(output, "/strings/", sample, ".short.DNAstrings.RDS"))
+  writeXStringSet(short.strings,
+                  filepath = paste0(output, "/fastas2/", sample, ".short.fa"),
+                  format = "fasta")
+  rm(short.strings)
+
+  print("Converting start regions")
+  start.regions <- readRDS(paste0(output, "/degraded_regions/", sample, ".long.start.gr.RDS"))
+  #start.regions <- start.regions[-which(strand(start.regions) == "*"),]
+  start.strings <- getSeq(Hsapiens, start.regions)
+
+  rm(start.regions)
+  
+  print("Converting end regions")
+  end.regions <-  readRDS(paste0(output, "/degraded_regions/", sample, ".long.end.gr.RDS"))
+  #end.regions <- end.regions[-which(strand(end.regions) == "*"),]
+  end.strings <- getSeq(Hsapiens, end.regions)
+  rm(end.regions)
+  
+  long.strings <- c(start.strings, end.strings)
+  rm(start.strings)
+  rm(end.strings)
+
+  saveRDS(long.strings, paste0(output, "/strings/", sample, ".long.DNAstrings.RDS"))
+  writeXStringSet(long.strings,
+                  filepath = paste0(output, "/fastas2/", sample, ".long.fa"),
+                  format = "fasta")
+  rm(long.strings)
+}
+```
+
+
+```{r}
+for(sample in samples){
+  range_to_string(sample, chr.gr)
+}
+
+
+for(i in paste0("random.", samples)){
+  range_to_string(sample = i, chr.gr)
+}
+```
+
+
+
+# Run HOMER to find enriched DNA sequences
+
+```{bash, eval = FALSE}
+# don't think this code will actually run as is,
+# would need to replace first line
+# cd path/to/fasta/directory
+
+# Fasta line names need to be labelled for HOMER to run
+echo "changing short line names"
+for sample in *.short.fa
+  do
+  sample=$(basename ${sample} .short.fa)
+  gawk '{if ($0 ~/^>/) {h[$1]++; $1=$1 "line_" h[$1]} print}' ${sample}.short.fa > ${sample}.short.headers.fa
+  done
+
+echo "changing long line names"
+for sample in *.long.fa
+  do
+  sample=$(basename ${sample} .long.fa)
+  gawk '{if ($0 ~/^>/) {h[$1]++; $1=$1 "line_" h[$1]} print}' ${sample}.long.fa > ${sample}.long.headers.fa
+  done
+
+## Run through homer2
+# Note this takes ages! At least 1 hour per sample...
+
+echo "running homer"
+export PATH=~/Documents/R/Homer/bin:$PATH
+for sample in *.short.headers.fa
+  do
+  base=$(basename ${sample} .short.headers.fa)
+  echo $base
+  homer2 denovo -i ${base}.short.headers.fa \
+                -b ${base}.long.headers.fa \
+                -o ../homer/${base}.txt
+  done
+  
+echo "Finished!"
+echo "Run motif2meme.R to convert output to meme format for tomtom"
+
+```
+
+
+#Dont run this bit
+# Extracting motifs to see if any are shared
+```{bash}
+# This is saved as 04_extract_motifs_only.sh
+# looped this for each file 
+#!/bin/bash
+
+if [ $# -eq 0 ]; then
+  echo "Please provide the path to the .txt file as an argument."
+  exit 1
+fi
+
+# Read the file line by line
+while IFS= read -r line; do
+  # Check if the line starts with ">"
+  if [[ $line == ">"* ]]; then
+    # Extract the string without the ">" character
+    string="${line:1}"
+    # Extract the first word from the string
+    first_word=$(echo "$string" | awk '{print $1}')
+    echo "$first_word"
+  fi
+done < "$1"
+
+```
+
+
+```{r temp as steps above have not been completed for all samples}
+
+current_files <- read_lines(paste0(output, "/motifs/motifs_only/current_files.txt"))
+length(current_files)
+get_id <- function(x){str_sub(x, 1,-5)}
+current_sample_ids <- lapply(current_files, get_id) %>% unlist()
+
+load_motif <- function(x){read_lines(paste0(output, "/motifs/motifs_only/", x))}
+all_motifs <- lapply(current_files, load_motif)
+
+names(all_motifs) <- current_sample_ids
+
+unlisted_all_motifs <- unlist(all_motifs)
+motif_count <- table(unlisted_all_motifs)
+motif_count %>% sort()
+all_motifs
+
+# split by group
+# get motif list and sample info in same order.
+current_info <- sample_info[sample_info$sample_id %in% current_sample_ids,] %>%
+  mutate(upper_id = toupper(sample_id)) %>% # required as source is case sensitive
+  arrange(upper_id)
+
+current_info
+current_info[current_info$sample_id == "EGAF00002727664",]
+
+current_info
+names(all_motifs)
+
+all_motifs
+high_gc_motifs <- all_motifs[which(current_info$group == "high_gc")]
+low_gc_motifs <- all_motifs[which(current_info$group == "low_gc")] 
+healthy_motifs <- all_motifs[which(current_info$group == "healthy")]
+
+my_crc_motifs
+sample_info[sample_info$group == "my_crc",] %>% tail()
+unlist(brca_motifs) %>% table() %>% sort
+unlist(my_crc_motifs) %>% table() %>% sort
+unlist(healthy_motifs) %>% table() %>% sort
+
+
+#Split my_crc by high/low
+
+
+```
+
+
+# Start here again 
+
+# Get TFs predicted to bind to these regions.
+
+```{r convert motif file structure, eval = FALSE}
+## THIS SCRIPT IS NOT WRITTEN BY ME -- COPIED AND PASTED FROM MEME SCRIPT
+
+motif2meme <- function(inFile) {
+    library(tools)
+    #establishing the number of distinct motifs in the file and parsing it accordingly
+    stopifnot(is.character(inFile))
+    outFile <- paste(inFile,"meme",sep=".")
+    thisFile <- file(outFile)
+    fileName <- file_path_sans_ext(inFile)
+    #reading the input file
+    motif.file <- scan(file=inFile,character(0), sep="\n",quote=NULL)
+    motif.index <- grep(pattern="^>",motif.file)
+    n.motifs <- length(motif.index)
+    total.len <-  length(motif.file)
+    #print(n.motifs)
+    sink(thisFile,append=TRUE)
+    cat("MEME version 4\n\n",file=thisFile,append=TRUE)
+    cat("ALPHABET= ACGT\n\n",file=thisFile,append=TRUE)
+    cat("strands: + -\n\n")
+    nameSplit <- strsplit(fileName,"_")
+    nameNum <- nameSplit[[1]][1]
+    motifNum <- sub("^.....(..).*", "\\1", nameNum)  # fifth
+    for (i in 1:(n.motifs-1)) {
+        #print(i)
+        #print(" ")
+        (motif.index[i]+1) -> index.start
+        ((motif.index[i+1])-1) -> index.end
+        motif.file[index.start:index.end] -> this_motif
+                   strsplit(this_motif,split="\t") -> motif_split
+                   #print(head(motif_split))
+                   length(this_motif) -> motif_row
+                   array(NA,c(motif_row,4)) -> motif_array
+                   for (n in 1:motif_row) {
+                       as.numeric(motif_split[[n]]) -> motif_array[n,]
+                   }
+                   motif_array <- as.data.frame(motif_array)
+                   motif.file[motif.index[i]] -> header.string
+                   strsplit(header.string,split="[\t]") -> prob.string
+                   prob.string[[1]][6] -> prob.string2
+                   strsplit(prob.string2,"[:]") -> prob.string3
+                   prob.string3[[1]][4] -> this.p.val
+                   prob.string[[1]][2] -> name.string
+                   strsplit(name.string,split=",") -> name.string2
+                   name.string2[[1]][1] -> name.string3
+                   motif_name <- paste("motif",motifNum,i,sep="_")
+                   cat("MOTIF",motif_name,name.string3,"\n",file=thisFile, append=TRUE)
+                   cat("letter-probability matrix: ",file=thisFile, append=TRUE)
+                   cat("alength= 4 w=", motif_row, file=thisFile, append=TRUE)
+                   cat(" nsites= 20 ",file=thisFile, append=TRUE)
+                   cat("E= ",file=thisFile, append=TRUE)
+                   cat(this.p.val,"\n",file=thisFile, append=TRUE)
+                   write.table(motif_array,file=thisFile,append=TRUE,col.names=FALSE,row.names=FALSE,sep="\t")
+                   cat("\n",file=thisFile, append=TRUE)
+    }
+        (motif.index[n.motifs]+1) -> index.start
+        total.len -> index.end
+        motif.file[index.start:index.end] -> this_motif
+                   strsplit(this_motif,split="\t") -> motif_split
+                   #print(head(motif_split))
+                   length(this_motif) -> motif_row
+                   array(NA,c(motif_row,4)) -> motif_array
+                   for (n in 1:motif_row) {
+                       as.numeric(motif_split[[n]]) -> motif_array[n,]
+                   }
+                   motif_array <- as.data.frame(motif_array)
+                   motif.file[motif.index[i]] -> header.string
+                   strsplit(header.string,split="[\t]") -> prob.string
+                   prob.string[[1]][6] -> prob.string2
+                   strsplit(prob.string2,"[:]") -> prob.string3
+                   prob.string3[[1]][4] -> this.p.val
+                   prob.string[[1]][2] -> name.string
+                   strsplit(name.string,split=",") -> name.string2
+                   name.string2[[1]][1] -> name.string3
+                   motif_name <- paste("motif",motifNum,i,sep="_")
+                   cat("MOTIF",motif_name,name.string3,"\n",file=thisFile, append=TRUE)
+                   cat("letter-probability matrix: ",file=thisFile, append=TRUE)
+                   cat("alength= 4 w=", motif_row, file=thisFile, append=TRUE)
+                   cat(" nsites= 20 ",file=thisFile, append=TRUE)
+                   cat("E= ",file=thisFile, append=TRUE)
+                   cat(this.p.val,"\n",file=thisFile, append=TRUE)
+                   write.table(motif_array,file=thisFile,append=TRUE,col.names=FALSE,row.names=FALSE,sep="\t")
+                   cat("\n",file=thisFile, append=TRUE)
+   sink()
+   close(thisFile) 
+   print("matrix has been converted to MEME")
+}
+                       
+#There is an issue with this script, instead of converting the last (25th) motif,
+#it replicates the second to last (24th) motif. Unsure how to fix.
+```
+
+
+```{r}
+for(i in samples){
+  print(paste("converting", i))
+  motif2meme(paste0(output, "/homer/", i, ".txt"))
+}
+
+for(i in samples[1:17]){
+  print(paste("converting", i))
+  motif2meme(paste0(output, "/homer/random.", i, ".txt"))
+}
+```
+
+
+Two paths from here
+* use tomtom to predict TFBSs
+* check if there are some motifs present in multiple samples
+
+
+
+
+```{bash}
+#Loop to run tomtom for all motif files in meme format in the file
+#make sure meme is added to PATH
+export PATH=$PATH:~/Documents/R/meme-5.5.3/scripts/
+for meme in *.meme
+  do
+  base=$(basename ${meme} .txt.meme)
+  echo $base
+  tomtom ${base}.txt.meme \
+  ~/Documents/GCproject_final/data/motif_databases/CIS-BP_2.00/Homo_sapiens.meme  \
+  -o ~/Documents/GCproject_final/output/motifs/tomtom/${base}_CIS-BP_2.0
+  done
+
+
+# extracting transcription factor id of matches
+cd ~/Documents/GCproject_final/output/motifs/tomtom
+ls > tomtom.files.txt
+
+
+
+cat tomtom.files.txt | while read line
+  do
+  cd ./${line}
+  files=$(ls *.tsv)
+  cut -f2 ${files} > tmp.txt
+  head -n -4 tmp.txt | tail -n +2 > tmp2.txt
+  uniq -u tmp2.txt > ${line}.matches.txt
+  rm tmp.txt
+  rm tmp2.txt
+  cd ../
+done
+
+#same as above, just modifying to get only significant matches (q < 0.05)
+
+cat tomtom.files.txt | while read line
+  do
+  echo $line
+  cd ./${line}
+  files=$(ls *.tsv)
+  head -n -4 ${files} | tail -n +2 > tmp.txt
+  awk '{ if ($6 < 0.05) print $2 }' tmp.txt > tmp2.txt
+  uniq -u tmp2.txt > ${line}.matches2.txt
+  rm tmp.txt
+  rm tmp2.txt
+  cd ../
+done
+
+
+# to search through motif database to get gene id for the id given in tomtom.tsv
+cat tomtom.files.txt | while read file
+do
+  cd ./${file}
+  cat *.matches.txt | while read line
+  do
+    hits=$(grep ${line} ~/Documents/GCproject_final/data/motif_databases/CIS-BP_2.00/Homo_sapiens.meme)
+    echo "$file,$hits" >> motif.hits.txt
+  done
+  cd ../
+done
+
+cat tomtom.files.txt | while read file
+do
+  cd ./${file}
+  cat *.matches2.txt | while read line
+  do
+    hits=$(grep ${line} ~/Documents/GCproject_final/data/motif_databases/CIS-BP_2.00/Homo_sapiens.meme)
+    echo "$file,$hits" >> motif.hits2.txt
+  done
+  cd ../
+done
+
+# combines into one file
+cat tomtom.files.txt | while read file
+  do
+    cd ./${file}
+    echo $file
+    cat motif.hits.txt >> ~/Documents/GCproject_final/output/motifs/tomtom/combined.motif.hits.txt
+    cd ../
+  done
+  
+cat tomtom.files.txt | while read file
+  do
+    cd ./${file}
+    echo $file
+    cat motif.hits2.txt >> ~/Documents/GCproject_final/output/motifs/tomtom/combined.motif2.hits.txt
+    cd ../
+  done
+
+#Some samples had no significant matches
+```
+

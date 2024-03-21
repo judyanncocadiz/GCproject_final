@@ -1,0 +1,792 @@
+---
+title: "Genomic Features"
+author: "Judy Ann Cocadiz"
+date: "2023-05-29"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+title: "Genomic_Features.rmd"
+author: "Judy Ann Cocadiz"
+date: "2023-05-23"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Intro
+Exploration of short fragments in different genomic features.
+Script modified from 04.1_Genomic-Features.r
+
+
+
+
+```{r load libraries, echo=FALSE}
+library(tidyverse)
+library(Homo.sapiens)
+library(GenomicRanges)
+```
+
+
+To run this script you need:
+  - a csv file containing:
+    * sample_id
+    * bam_path (i.e. path/to/bam)
+    * group (eg. high_crc, low_crc, healthy, brca)
+  - a directory containing .RDS files of the bam files that have been converted to GenomicRanges
+    * can get by running 01_Create_Fragment_Profiles.Rmd
+  - output folder path
+
+
+```{r prep sample ids, echo=FALSE}
+# path to sample info. Must sample_id + group column
+sample_info <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/data/bams/all_sample_info2.csv"
+sample_info <- read_csv(sample_info)
+all_samples <- sample_info$sample_id
+all_samples
+
+gr_dir <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/output/fragment_profiles/granges"
+data <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/data/genomic_features"
+output <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/output/genomic_features"
+
+
+```
+
+
+
+
+```{r}
+
+compare_short_vs_long_in_genomic_features <- function(samples, sample_gr_dir, genomic_feature_gr){
+  gen_feature_ol_percent <- list(sample = NA,
+                            percent_shorts_in_gf = NA,
+                            percent_longs_in_gf = NA) %>% as_tibble()
+  for(sample in samples){
+    print(sample)
+    sample_gr <- readRDS(paste0(sample_gr_dir, "/", sample, ".gr.RDS"))
+    frag_lengths <- width(sample_gr)
+    total_shorts <- length(frag_lengths[which(frag_lengths >= 100 & frag_lengths < 150)])
+    total_longs <- length(frag_lengths[which(frag_lengths >= 150 & frag_lengths < 220)])
+    ol <- findOverlaps(genomic_feature_gr, sample_gr)
+    # don't want to double count a fragment that spans more than 1 genomic region
+    not_dup_ol <- subjectHits(ol)[!duplicated(subjectHits(ol))] 
+    gf_counts <- sample_gr[not_dup_ol,]
+    gf_frag_lengths <- width(gf_counts)
+    gf_shorts <- length(gf_frag_lengths[which(gf_frag_lengths >= 100 & gf_frag_lengths < 150)])
+    gf_longs <- length(gf_frag_lengths[which(gf_frag_lengths >= 150 & gf_frag_lengths < 220)])
+    percent_shorts_in_gfs <- gf_shorts/total_shorts
+    percent_longs_in_gfs <- gf_longs/total_longs
+  
+    gen_feature_ol_percent <- add_row(gen_feature_ol_percent,
+            sample = sample,
+            percent_shorts_in_gf = percent_shorts_in_gfs,
+            percent_longs_in_gf = percent_longs_in_gfs)
+
+  }
+  gen_feature_ol_percent <- gen_feature_ol_percent[-1,]
+  return(gen_feature_ol_percent)
+}
+
+
+
+```
+
+
+# GC content
+
+GC content often correlates with chromatin structure. GC rich regions tend to have more open chromatin (see Dekker(2007) doi: 10.1186/gb-2007-8-6-r116).
+
+This was only calculated for ends of frags, might redo with full frag GC content instead
+
+
+# Exons
+
+```{r prep exon gr, eval = FALSE}
+exons <- read_tsv(paste0(data, "/ucsc_tables_exons.csv"))
+colnames(exons) <- c("seqnames", "Start", "End", "genesymbol")
+exons <- makeGRangesFromDataFrame(exons, keep.extra.columns = TRUE)
+
+
+exon_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                           sample_gr_dir = gr_dir,
+                                                           genomic_feature_gr = exons)
+
+saveRDS(exon_percents, paste0(output, "/exon2.RDS"))
+
+```
+
+```{r}
+exon_percents <- readRDS(paste0(output, "/exon2.RDS"))
+
+exon_percents <- exon_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                         percent_longs_in_gf),
+                                                         names_to = "short.or.long",
+                                                         values_to = "percent_of_fragments_overlapping_exons")
+
+ggplot(exon_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_exons, color = sample)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping exons")
+
+ggsave(paste0(output, "/plots4/exons.png"))
+
+exon <- exon_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(exon, aes(x=short.or.long,y=percent_of_fragments_overlapping_exons)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping exons")
+
+ggsave(paste0(output, "/plots4/exons_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(exon, aes(x=short.or.long,y=percent_of_fragments_overlapping_exons, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping exons")+
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/exons_split_violin.png"))
+```
+
+
+
+# Promoters
+
+Are short fragments more likely to sit in promoters than long fragments?
+Calculate the % of short frags that are located in promoter regions compared to % of long frags
+
+
+```{r prep promoter gr, eval = FALSE}
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+genes <- genes(txdb)
+promoters <- promoters(txdb, upstream = 2000, downstream = 500) %>%
+  trim(use.names = TRUE)
+
+promoter_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                               sample_gr_dir = gr_dir,
+                                                               genomic_feature_gr = promoters)
+
+
+saveRDS(promoter_percents, paste0(output, "/promoter2.RDS"))
+```
+
+
+```{r}
+promoter_percents <- readRDS(paste0(output, "/promoter2.RDS"))
+
+promoter_percents <- promoter_percents %>%
+  pivot_longer(cols = c(percent_shorts_in_gf,
+  percent_longs_in_gf),
+  names_to = "short.or.long",
+  values_to = "percent_of_fragments_overlapping_promoters")
+
+
+ggplot(promoter_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_promoters, color = sample)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping promoters")
+
+ggsave(paste0(output, "/plots4/promoters.png"))
+
+promoter <- promoter_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(promoter, aes(x=short.or.long,y=percent_of_fragments_overlapping_promoters)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none")+
+  ggtitle("% of fragments overlapping promoters")
+
+ggsave(paste0(output, "/plots4/promoters_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(promoter, aes(x=short.or.long,y=percent_of_fragments_overlapping_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none")+
+  ggtitle("% of fragments overlapping promoters") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/promoters_split_violin.png"))
+
+```
+
+
+
+# 5' UTRs
+
+* To do: check where 5' UTRs sit relative to TSS
+
+
+```{r get fiveUTR overlaps, eval = FALSE}
+fiveUTR <- read_tsv(paste0(data,"/refseq_tables_5UTRS.csv"), col_names = FALSE)
+
+colnames(fiveUTR) <- c("seqnames", "Start", "End", "id", "unknown", "strand")
+fiveUTR <- makeGRangesFromDataFrame(fiveUTR, keep.extra.columns = TRUE)
+
+fiveUTR_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                              sample_gr_dir = gr_dir,
+                                                              genomic_feature_gr = fiveUTR)
+
+saveRDS(fiveUTR_percents, paste0(output, "/fiveUTR_2.RDS"))
+
+```
+
+```{r}
+fiveUTR_percents <- readRDS(paste0(output, "/fiveUTR_2.RDS"))
+fiveUTR_percents <- fiveUTR_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_overlapping_fiveUTRs")
+
+
+ggplot(fiveUTR_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_fiveUTRs, color = sample)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping 5UTRs")
+
+ggsave(paste0(output, "/plots4/fiveUTR.png"))
+
+fiveUTR <- fiveUTR_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(fiveUTR, aes(x=short.or.long,y=percent_of_fragments_overlapping_fiveUTRs)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping 5UTRs")
+
+ggsave(paste0(output, "/plots4/fiveUTR_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(fiveUTR, aes(x=short.or.long,y=percent_of_fragments_overlapping_fiveUTRs, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping 5UTRs") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/fiveUTR_split_violin.png"))
+```
+
+
+% of shorts decreases. see where around TSS % of shorts flattens then decreases
+
+
+```{r prep windows gr, eval = FALSE}
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+upstream_position <- -2000
+downstream_position <- 0
+window <- promoters(txdb, upstream = 2000, downstream = 0)
+for(i in 1:20){
+  upstream_position <- upstream_position + 500
+  downstream_position <- downstream_position + 500
+  window_region <- paste0(upstream_position, "to", downstream_position)
+  window <- shift(window, 500) %>% trim(use.names = TRUE)
+  window_percents <-  compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = window)
+  saveRDS(window_percents, paste0(output, "/window3/", window_region, "_bp_around_TSS.RDS"))
+}
+
+
+```
+
+
+```{r}
+upstream_points <- c(-1500, -1000, -500, 0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500)
+
+#upstream_points <- seq(-2000, 7500, 500)
+
+
+for(upstream in upstream_points){
+  filename <- paste0(upstream, "to", 2000 + upstream, "_bp_around_TSS.RDS")
+  window_percents <- readRDS(paste0(output, "/window2/", filename))
+  window_percents <- window_percents %>%
+    pivot_longer(cols = c(percent_shorts_in_gf,
+                          percent_longs_in_gf),
+                          names_to = "short.or.long",
+                          values_to = "percent_of_fragments_overlapping_window")
+  
+  ggplot(window_percents, aes(x = short.or.long,
+                              y= percent_of_fragments_overlapping_window,
+                              color = sample)) +
+    geom_point() +
+    geom_line(aes(group = sample)) +
+    scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+    scale_y_continuous(name = "% of fragments overlapping window") +
+    theme(legend.position = "none") +
+    ggtitle(paste(upstream, "to", 2000 + upstream, "bp around TSS"))
+  
+  ggsave(filename = paste0(output, "/window2/plots/", upstream, "to", 2000 + upstream, ".png"),plot = last_plot(), device = "png")
+  
+
+window <- window_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(window, aes(x=short.or.long,y=percent_of_fragments_overlapping_window)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments overlapping window") +
+  theme(legend.position = "none") +
+  ggtitle(paste(upstream, "to", 2000 + upstream, "bp around TSS"))
+
+ggsave(filename = paste0(output, "/window2/plots/", upstream, "to", 2000 + upstream, "_split.png"),plot = last_plot(), device = "png")
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(window, aes(x=short.or.long,y=percent_of_fragments_overlapping_window, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments overlapping window") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle(paste(upstream, "to", 2000 + upstream, "bp around TSS")) +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(filename = paste0(output, "/window2/plots/", upstream, "to", 2000 + upstream, "_split_violin.png"),plot = last_plot(), device = "png")
+  
+}
+
+
+```
+
+
+
+
+# G4s
+
+```{r, eval = FALSE}
+G4s <- read_tsv(paste0(data, "/GSE63874_MERGED_PDS_plus_hits_intersect.bed"), col_names= FALSE)
+colnames(G4s) <- c("seqnames", "start", "end")
+G4.gr <- makeGRangesFromDataFrame(G4s)
+G4_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                         sample_gr_dir = gr_dir,
+                                                         genomic_feature_gr = G4.gr)
+
+saveRDS(G4_percents, paste0(output, "/G4_2.RDS"))
+
+```
+
+```{r}
+G4_percents <- readRDS(paste0(output, "/G4_2.RDS"))
+G4_percents <- G4_percents %>%
+  pivot_longer(cols = c(percent_shorts_in_gf,
+                        percent_longs_in_gf),
+                        names_to = "short.or.long",
+                        values_to = "percent_of_fragments_overlapping_G4s")
+
+
+ggplot(G4_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_G4s, color = sample)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping G4s")
+
+ggsave(paste0(output, "/plots4/G4.png"))
+
+G4 <- G4_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc", 
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(G4, aes(x=short.or.long,y=percent_of_fragments_overlapping_G4s)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping G4s")
+
+ggsave(paste0(output, "/plots4/G4_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(G4, aes(x=short.or.long,y=percent_of_fragments_overlapping_G4s, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping G4s") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/G4_split_violin.png"))
+
+```
+
+
+
+
+
+# Genes with higher expression in GC from RNAseq analysis
+Only run this if you have run 01.5_RNAseq_analysis.Rmd to get lists of differentially expressed genes
+
+
+ie are there a greater percentage of shorts in
+
+a) more highly expressed genes
+b) genes that are differentially expressed in GC (cancer patients vs controls)
+
+```{r}
+### Differentially Expressed Gene Promoters ###
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+genes <- genes(txdb)
+
+promoters <- promoters(txdb, upstream = 4000, downstream = 4000) %>%
+  trim(use.names = TRUE)
+
+high_in_stad <- read_lines(paste0(output, "/RNAseq/stad_enriched.txt"))
+high_in_blood <- read_lines(paste0(output, "/RNAseq/blood_enriched.txt"))
+low_in_both <- read_lines(paste0(output, "/RNAseq/low_in_stad_and_blood.txt"))
+high_in_stad2 <- read_lines(paste0(output, "/RNAseq/stad2_enriched.txt"))
+
+keys <- as.character(promoters$tx_id)
+AnnotationDbi::select(Homo.sapiens, keys = keys, columns = c("TXID", "ENTREZID", "SYMBOL"), keytype = "TXID") -> conversion.df
+mcols(promoters)$symbol <- conversion.df$SYMBOL
+
+# select 1 transcript per gene
+promoters <- promoters[!duplicated(promoters$symbol),]
+stad_pros <- promoters[promoters$symbol %in% high_in_stad,]
+blood_pros <- promoters[promoters$symbol %in% high_in_blood,]
+low_pros <-  promoters[promoters$symbol %in% low_in_both,]
+stad2_pros <- promoters[promoters$symbol %in% high_in_stad2,]
+
+
+```
+
+
+Would expect enrichment in gc patients, but no enrichment in controls
+```{r, eval = FALSE}
+high_stad_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = stad_pros)
+
+saveRDS(high_stad_percents, paste0(output, "/high_stad_pros_2.RDS"))
+
+```
+
+```{r}
+high_stad_percents <- readRDS(paste0(output, "/high_stad_pros_2.RDS"))
+high_stad_percents <- high_stad_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_STAD_highly_expressed_promoters")
+
+
+ggplot(high_stad_percents, aes(x = short.or.long, y= percent_of_fragments_STAD_highly_expressed_promoters, color = sample)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD")
+
+ggsave(paste0(output, "/plots4/STAD_line.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(high_stad_percents, aes(x = short.or.long, y= percent_of_fragments_STAD_highly_expressed_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/STAD_violin.png"))
+
+# No discernible difference - what if we split by groups
+
+high_stad <- high_stad_percents %>% mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                                                             substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                                                             substr(sample,1,1) == "P" ~ "delfi_gc",
+                                                             substr(sample,1,1) == "E" ~ "healthy"))
+
+
+ggplot(high_stad, aes(x = short.or.long, y= percent_of_fragments_STAD_highly_expressed_promoters)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD")
+
+ggsave(paste0(output, "/plots4/STAD_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(high_stad, aes(x = short.or.long, y= percent_of_fragments_STAD_highly_expressed_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/STAD_split_violin.png"))
+
+```
+
+
+
+
+Expect to see similar in all groups I think - higher shorts
+```{r, eval = FALSE}
+high_blood_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                 sample_gr_dir = gr_dir,
+                                                                 genomic_feature_gr = blood_pros)
+
+saveRDS(high_blood_percents, paste0(output, "/short_vs_long_percents/high_blood_pros_2.RDS"))
+
+```
+
+```{r}
+high_blood_percents <- readRDS(paste0(output, "/short_vs_long_percents/high_blood_pros_2.RDS"))
+high_blood_percents <- high_blood_percents %>%
+  pivot_longer(cols = c(percent_shorts_in_gf, percent_longs_in_gf),
+               names_to = "short.or.long",
+               values_to = "percent_of_fragments_blood_highly_expressed_promoters")
+
+
+high_blood <- high_blood_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(high_blood, aes(x=short.or.long,y=percent_of_fragments_blood_highly_expressed_promoters)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in blood")
+
+ggsave(paste0(output, "/plots4/blood_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(high_blood, aes(x=short.or.long,y=percent_of_fragments_blood_highly_expressed_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in blood") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/blood_split_violin.png"))
+```
+
+
+
+
+Maybe will see long frag enrichment across all groups??? pros should be more "closed" as low expression in both coad and blood
+```{r, eval = FALSE}
+
+low_in_both_percents <-  compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                   sample_gr_dir = gr_dir,
+                                                                   genomic_feature_gr = low_pros)
+
+saveRDS(low_in_both_percents, paste0(output, "/short_vs_long_percents/low_in_both_pros_2.RDS"))
+```
+
+
+```{r}
+low_in_both_percents <- readRDS(paste0(output, "/short_vs_long_percents/low_in_both_pros_2.RDS"))
+low_in_both_percents <- low_in_both_percents %>%
+  pivot_longer(cols = c(percent_shorts_in_gf, percent_longs_in_gf),
+               names_to = "short.or.long",
+               values_to = "percent_of_fragments_low_promoters")
+
+low <- low_in_both_percents %>%
+  mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                          substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc", 
+                          substr(sample,1,1) == "P" ~ "delfi_gc",
+                          substr(sample,1,1) == "E" ~ "healthy"))
+
+ggplot(low, aes(x=short.or.long,y=percent_of_fragments_low_promoters)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping promoters low in STAD & blood")
+
+ggsave(paste0(output, "/plots4/low_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(low, aes(x=short.or.long,y=percent_of_fragments_low_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping promoters low in STAD & blood") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/low_split_violin.png"))
+
+```
+
+# STAD 2 enriched genes (vs gtex, and blood)
+```{r, eval = FALSE}
+high_stad2_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = stad2_pros)
+
+saveRDS(high_stad2_percents, paste0(output, "/high_stad2_pros.RDS"))
+
+```
+
+```{r}
+high_stad2_percents <- readRDS(paste0(output, "/high_stad2_pros.RDS"))
+high_stad2_percents <- high_stad2_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_STAD2_highly_expressed_promoters")
+
+
+ggplot(high_stad2_percents, aes(x = short.or.long, y= percent_of_fragments_STAD2_highly_expressed_promoters, color = sample)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD 2")
+
+ggsave(paste0(output, "/plots4/STAD2_line.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(high_stad2_percents, aes(x = short.or.long, y= percent_of_fragments_STAD2_highly_expressed_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD 2") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/STAD2_violin.png"))
+
+# No discernible difference - what if we split by groups
+
+high_stad2 <- high_stad2_percents %>% mutate(group = case_when(substr(sample,nchar(sample),nchar(sample)) == "e" ~ "high_gc",
+                                                             substr(sample,nchar(sample),nchar(sample)) == "t" ~ "low_gc",
+                                                             substr(sample,1,1) == "P" ~ "delfi_gc",
+                                                             substr(sample,1,1) == "E" ~ "healthy"))
+
+
+ggplot(high_stad2, aes(x = short.or.long, y= percent_of_fragments_STAD2_highly_expressed_promoters)) +
+  geom_point(aes(color = sample)) +
+  geom_line(aes(group = sample, color = sample)) +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD 2")
+
+ggsave(paste0(output, "/plots4/STAD2_split.png"))
+
+violin_colors = c("#fcf8b8", "#c39fe3")
+ggplot(high_stad2, aes(x = short.or.long, y= percent_of_fragments_STAD2_highly_expressed_promoters, fill = short.or.long)) +
+  geom_violin() +
+  geom_point() +
+  facet_wrap(~group, nrow = 1) +
+  scale_x_discrete(name = "Short or Long", labels=c("percent_shorts_in_gf" = "% Shorts", "percent_longs_in_gf" = "% Longs")) +
+  scale_y_continuous(name = "% of fragments") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("% of fragments overlapping highly expressed promoters in STAD 2") +
+  scale_fill_manual(values = violin_colors)
+
+ggsave(paste0(output, "/plots4/STAD2_split_violin.png"))
+
+```
+

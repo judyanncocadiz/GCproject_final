@@ -1,0 +1,867 @@
+---
+title: "Promoter Patterns"
+author: "Judy Ann Cocadiz"
+date: "2023-06-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Note: this is still a work in progress, need to tidy up!
+
+To run this script you will need:
+  - a csv file with sample information including:
+    * sample_id
+    * bam_path (i.e. path/to/bam)
+    * short_path (code required to produce short & long bams is below)
+    * long_path
+    * group (eg. high_crc, low_crc, healthy)
+  - output folder path
+
+## Set up
+
+
+```{r load libraries}
+library(tidyverse)
+library(here)
+library(GenomicRanges)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(plyranges)
+library(csaw)
+library(Homo.sapiens)
+library(factoextra)
+library(liftOver)
+library(biomaRt)
+```
+
+In order for this script to run, bam files need to be split into two bams: short fragments and long fragments.
+The code to do this is below, but may need to be modified.
+Dont run full script, run each loop separately
+```{bash}
+# sort all bam files
+# cd to bam directory
+for infile in *bam
+  do
+  base=$(basename ${infile} .bam)
+  echo "sorting "$base.bam
+  samtools sort $base.bam > $base.sorted.bam
+  echo "saved as "$base.sorted.bam
+  done
+
+## split to short
+for file in */*WGS_processed.bam
+  do
+   base=`basename $file _processed.bam`
+   echo "getting short reads for "$base
+   samtools view -h $file |\
+   awk 'substr($0,1,1)=="@" || ($9>= 100 && $9<=150) || ($9<=-100 && $9>=-150)' | \
+   samtools view -b > ./${base}.short.bam
+  done
+mv *short.bam ~/Documents/GC_DELFIproject/EGAdata/healthy_samples_short/
+  
+## split to long
+for file in */*WGS_processed.bam
+  do
+   base=`basename $file _processed.bam`
+   echo "getting long reads for "$base
+   samtools view -h $file |\
+   awk 'substr($0,1,1)=="@" || ($9>= 151 && $9<=220) || ($9<=-151 && $9>=-220)' | \
+   samtools view -b > ./${base}.long.bam
+  done
+mv *long.bam ~/Documents/GC_DELFIproject/EGAdata/healthy_samples_long/
+
+## create index for each file
+for file in *.short.bam
+do
+echo "indexing "$file
+samtools index ${file} ${file}.bai
+done
+
+for file in *.long.bam
+do
+echo "indexing "$file
+samtools index ${file} ${file}.bai
+done
+
+
+```
+
+
+
+```{r prep bam names}
+# path to sample info. Must sample_id + group column
+sample_info <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/data/promoter_patterns/all_sample_info3.csv"
+sample_info <- read_csv(sample_info)
+all_samples <- sample_info$sample_id
+
+output <- "/Volumes/archive/userdata/student_users/judyanncocadiz/Documents/GCproject_final/output"
+
+
+```
+
+
+```{r}
+#path to short bams
+short_bams <- sample_info$short_path
+#path to long bams
+long_bams <- sample_info$long_path
+```
+
+
+# Get Sliding window counts for each sample
+
+Only run if you don't have sliding window counts, this will take a long time.
+
+I have repeated this without a sliding window to evaluate whether this impacts results downstream
+
+```{r function to get counts data, eval = FALSE}
+
+get.counts <- function(short.path, long.path, width = 2000, spacing = 500, id){
+  param <- readParam(pe = "both")
+  count <- windowCounts(bam.files = c(short.path, long.path),
+                        spacing = spacing, width = width, param = param, filter = 0)
+  
+  count.gr <- rowRanges(count)  #get count info from summarized experiment object
+  count.gr$counts.s <- assays(count)$count[,1]  #short counts into GRanges object
+  count.gr$counts.l <- assays(count)$count[,2]   #long counts into GRanges object
+  #should include ratio?
+  return(count.gr)
+  
+}
+
+
+```
+
+
+```{r loop to get counts, eval = FALSE}
+
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  counts.gr <- get.counts(short_bams[i], long_bams[i], width = 2000, spacing = 500, id = all_samples[i])
+  saveRDS(counts.gr, paste0(output, "/promoter_patterns/sliding_window_counts/", all_samples[i], ".sw.counts.RDS"))
+}
+
+#This is not working for spacing = 0. Change to a positive integer?
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  counts.gr <- get.counts(short_bams[i], long_bams[i], width = 2000, spacing = 0, id = all_samples[i])
+  saveRDS(counts.gr, paste0(output, "/promoter_patterns/binned_counts/", all_samples[i], ".binned.counts.RDS"))
+}
+
+```
+
+
+
+
+# prep promoter locations
+
+```{r}
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+tss <- promoters(txdb, upstream = 1, downstream = 1) %>% trim(use.names = TRUE)
+keys <- as.character(tss$tx_name)
+AnnotationDbi::select(Homo.sapiens,
+                      keys = keys,
+                      columns = c("TXNAME", "ENTREZID", "SYMBOL"),
+                      keytype = "TXNAME") -> conversion.df
+
+mcols(tss)$entrezid <- conversion.df$ENTREZID
+mcols(tss)$symbol <- conversion.df$SYMBOL
+
+# only want one transcript per gene, just using first transcript
+# promoter should be approx same region anyway
+prmtrs <- tss[-which(duplicated(tss$symbol)),]
+chrms <- paste0("chr", 1:22)
+prmtrs <- prmtrs[prmtrs@seqnames %in% chrms]
+
+#resize all to 10000
+all_prmtrs <- resize(prmtrs, width = 10000, fix = 'center')
+saveRDS(prmtrs, paste0(output, "/promoter_patterns/promoterranges.RDS"))
+
+```
+
+```{r}
+high_in_stad <- read_lines(paste0(output, "/RNAseq/stad_enriched.txt"))
+high_in_stad2 <- read_lines(paste0(output, "/RNAseq/stad2_enriched.txt"))
+high_in_blood <- read_lines(paste0(output, "/RNAseq/blood_enriched.txt"))
+low_in_all <- read_lines(paste0(output, "/RNAseq/low_in_stad_and_blood.txt"))
+
+prmtrs_high_in_stad <- all_prmtrs[all_prmtrs$symbol %in% high_in_stad]
+prmtrs_high_in_stad2 <- all_prmtrs[all_prmtrs$symbol %in% high_in_stad2]
+prmtrs_high_in_blood <- all_prmtrs[all_prmtrs$symbol %in% high_in_blood]
+prmtrs_low_in_all <- all_prmtrs[all_prmtrs$symbol %in% low_in_all]
+
+```
+
+
+# promoter counts
+At the moment, this function ONLY works for sw counts - aiming to make it more flexible later.
+```{r get promoter counts function}
+
+promoter.counts <- function(counts, id, prmtrs){
+
+  prm.ol <- findOverlaps(counts, prmtrs)
+  mcols(counts)$promoters <- NA
+  
+  #storing the corresponding range of the prmtr GRange as an id to access later (during clustering)
+  mcols(counts)$promoters[queryHits(prm.ol)] <- prmtrs$symbol[subjectHits(prm.ol)]
+  all.pro <- counts[!is.na(counts$promoters)]
+  pro.count.list <- split(all.pro, ~ promoters)
+  # TODO: Find modal width
+  # TODO: work out what distance from TSS each bin is
+  # Remove promoters that do not contain 24 bins (as they overlap with other promoter regions)
+  pro.count.list <- pro.count.list[lengths(pro.count.list) == 24]
+  pro.counts <- unlist(pro.count.list)
+  # add in bin location
+  mcols(pro.counts)$position <- NA
+  mcols(pro.counts)$position <- rep(1:24, length(pro.counts)/24)
+  
+  # change 0 to 0.1 to avoid dividing by 0
+  counts <- as_tibble(mcols(pro.counts))
+  counts.cor <- counts %>% mutate(counts.s = ifelse(counts.s == 0, 0.1, counts.s),
+                                  counts.l = ifelse(counts.l == 0, 0.1, counts.l),
+                                  ratio = counts.s/counts.l) %>%
+    dplyr::select(-c(counts.s, counts.l))
+  
+  
+  #restructure to be used for clustering
+  spread.counts <- counts.cor %>% pivot_wider(names_from = position, values_from = ratio)
+  counts.df <- data.frame(spread.counts)
+  row.names(counts.df) <- counts.df$promoters
+  counts.df <- counts.df[,-1]
+  
+  return(counts.df)
+
+}
+
+length(samples)
+
+
+```
+
+
+
+```{r get promoter counts}
+#All promoters
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  prmtrs <- readRDS(paste0(output, "/promoter_patterns/promoterranges.RDS"))
+  counts <- readRDS(paste0(output, "/promoter_patterns/sliding_window_counts/", all_samples[i], ".sw.counts.RDS"))
+  pro.counts <- promoter.counts(counts = counts, id = all_samples[i], prmtrs = all_prmtrs)
+  saveRDS(pro.counts, paste0(output, "/promoter_patterns/pro_counts/all_promoters/", all_samples[i], ".RDS"))
+}
+
+#High in STAD
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  prmtrs <- readRDS(paste0(output, "/promoter_patterns/promoterranges.RDS"))
+  counts <- readRDS(paste0(output, "/promoter_patterns/sliding_window_counts/", all_samples[i], ".sw.counts.RDS"))
+  pro.counts <- promoter.counts(counts = counts, id = all_samples[i], prmtrs = prmtrs_high_in_stad)
+  saveRDS(pro.counts, paste0(output, "/promoter_patterns/pro_counts/high_in_stad/", all_samples[i], ".RDS"))
+}
+
+#High in STAD2
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  prmtrs <- readRDS(paste0(output, "/promoter_patterns/promoterranges.RDS"))
+  counts <- readRDS(paste0(output, "/promoter_patterns/sliding_window_counts/", all_samples[i], ".sw.counts.RDS"))
+  pro.counts <- promoter.counts(counts = counts, id = all_samples[i], prmtrs = prmtrs_high_in_stad2)
+  saveRDS(pro.counts, paste0(output, "/promoter_patterns/pro_counts/high_in_stad2/", all_samples[i], ".RDS"))
+}
+
+#High in Blood
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  prmtrs <- readRDS(paste0(output, "/promoter_patterns/promoterranges.RDS"))
+  counts <- readRDS(paste0(output, "/promoter_patterns/sliding_window_counts/", all_samples[i], ".sw.counts.RDS"))
+  pro.counts <- promoter.counts(counts = counts, id = all_samples[i], prmtrs = prmtrs_high_in_blood)
+  saveRDS(pro.counts, paste0(output, "/promoter_patterns/pro_counts/high_in_blood/", all_samples[i], ".RDS"))
+}
+
+#Low in all
+for(i in 1:length(all_samples)){
+  print(all_samples[i])
+  prmtrs <- readRDS(paste0(output, "/promoter_patterns/promoterranges.RDS"))
+  counts <- readRDS(paste0(output, "/promoter_patterns/sliding_window_counts/", all_samples[i], ".sw.counts.RDS"))
+  pro.counts <- promoter.counts(counts = counts, id = all_samples[i], prmtrs = prmtrs_low_in_all)
+  saveRDS(pro.counts, paste0(output, "/promoter_patterns/pro_counts/low_in_all/", all_samples[i], ".RDS"))
+}
+
+
+```
+
+
+
+# Summarising -- All Promoters
+```{r summarise promoter counts}
+
+bp.distance <- c(-5750, -5250, -4750, -4250, -3750, -3250, -2750, -2250, -1750, -1250, -750, -250,
+  250, 750, 1250, 1750, 2250, 2750, 3250, 3750, 4250, 4750, 5250, 5750)
+
+prmtr.means <- as_tibble(list(position = bp.distance))
+for(i in 1:length(all_samples)){
+  sample.counts <- readRDS(paste0(output, "/promoter_patterns/pro_counts/all_promoters/", all_samples[i], ".RDS"))
+  sample.means <- colMeans(sample.counts) %>%
+    as_tibble() %>%
+    add_column(position = bp.distance)
+  colnames(sample.means) <- c(all_samples[i], "position")
+  prmtr.means <- inner_join(prmtr.means, sample.means)
+}
+
+prmtr.means <- prmtr.means %>% pivot_longer(cols = 2:ncol(prmtr.means),
+                                            names_to= "sample",
+                                            values_to = "ratio")
+
+prmtr.means <- inner_join(prmtr.means, sample_info, join_by(sample == sample_id))
+ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/all_promoters.png"))
+
+#prettier
+library(bbplot)
+
+prmtr.means <- prmtr.means %>% mutate(sc.ratio = scale(ratio))
+ggplot(prmtr.means, aes(position, sc.ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~group) +
+  bbc_style() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/all_promoters2.png"))
+
+#interactive plot
+library(ggplot2)
+library(plotly)
+
+AP <- ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+ggplotly(AP, tooltip = "sample")
+
+
+```
+
+# Summarising -- High in STAD Promoters
+```{r summarise promoter counts}
+
+bp.distance <- c(-5750, -5250, -4750, -4250, -3750, -3250, -2750, -2250, -1750, -1250, -750, -250,
+  250, 750, 1250, 1750, 2250, 2750, 3250, 3750, 4250, 4750, 5250, 5750)
+
+prmtr.means <- as_tibble(list(position = bp.distance))
+for(i in 1:length(all_samples)){
+  sample.counts <- readRDS(paste0(output, "/promoter_patterns/pro_counts/high_in_stad/", all_samples[i], ".RDS"))
+  sample.means <- colMeans(sample.counts) %>%
+    as_tibble() %>%
+    add_column(position = bp.distance)
+  colnames(sample.means) <- c(all_samples[i], "position")
+  prmtr.means <- inner_join(prmtr.means, sample.means)
+}
+
+prmtr.means <- prmtr.means %>% pivot_longer(cols = 2:ncol(prmtr.means),
+                                            names_to= "sample",
+                                            values_to = "ratio")
+
+prmtr.means <- inner_join(prmtr.means, sample_info, join_by(sample == sample_id))
+
+ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/high_in_stad.png"))
+
+#prettier
+library(bbplot)
+
+prmtr.means <- prmtr.means %>% mutate(sc.ratio = scale(ratio))
+ggplot(prmtr.means, aes(position, sc.ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~group) +
+  bbc_style() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/high_in_stad_2.png"))
+
+#interactive plot
+
+HS <- ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+ggplotly(HS, tooltip = "sample")
+
+```
+
+# Summarising -- High in STAD2 Promoters
+```{r summarise promoter counts}
+
+bp.distance <- c(-5750, -5250, -4750, -4250, -3750, -3250, -2750, -2250, -1750, -1250, -750, -250,
+  250, 750, 1250, 1750, 2250, 2750, 3250, 3750, 4250, 4750, 5250, 5750)
+
+prmtr.means <- as_tibble(list(position = bp.distance))
+for(i in 1:length(all_samples)){
+  sample.counts <- readRDS(paste0(output, "/promoter_patterns/pro_counts/high_in_stad2/", all_samples[i], ".RDS"))
+  sample.means <- colMeans(sample.counts) %>%
+    as_tibble() %>%
+    add_column(position = bp.distance)
+  colnames(sample.means) <- c(all_samples[i], "position")
+  prmtr.means <- inner_join(prmtr.means, sample.means)
+}
+
+prmtr.means <- prmtr.means %>% pivot_longer(cols = 2:ncol(prmtr.means),
+                                            names_to= "sample",
+                                            values_to = "ratio")
+
+prmtr.means <- inner_join(prmtr.means, sample_info, join_by(sample == sample_id))
+ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/high_in_stad2.png"))
+
+#prettier
+library(bbplot)
+
+prmtr.means <- prmtr.means %>% mutate(sc.ratio = scale(ratio))
+ggplot(prmtr.means, aes(position, sc.ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~group) +
+  bbc_style() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/high_in_stad2_2.png"))
+
+#interactive plot
+
+HS2 <- ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+ggplotly(HS2, tooltip = "sample")
+
+```
+
+# Summarising -- High in Blood Promoters
+```{r summarise promoter counts}
+
+bp.distance <- c(-5750, -5250, -4750, -4250, -3750, -3250, -2750, -2250, -1750, -1250, -750, -250,
+  250, 750, 1250, 1750, 2250, 2750, 3250, 3750, 4250, 4750, 5250, 5750)
+
+prmtr.means <- as_tibble(list(position = bp.distance))
+for(i in 1:length(all_samples)){
+  sample.counts <- readRDS(paste0(output, "/promoter_patterns/pro_counts/high_in_blood/", all_samples[i], ".RDS"))
+  sample.means <- colMeans(sample.counts) %>%
+    as_tibble() %>%
+    add_column(position = bp.distance)
+  colnames(sample.means) <- c(all_samples[i], "position")
+  prmtr.means <- inner_join(prmtr.means, sample.means)
+}
+
+prmtr.means <- prmtr.means %>% pivot_longer(cols = 2:ncol(prmtr.means),
+                                            names_to= "sample",
+                                            values_to = "ratio")
+
+prmtr.means <- inner_join(prmtr.means, sample_info, join_by(sample == sample_id))
+ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/high_in_blood.png"))
+
+#prettier
+library(bbplot)
+
+prmtr.means <- prmtr.means %>% mutate(sc.ratio = scale(ratio))
+ggplot(prmtr.means, aes(position, sc.ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~group) +
+  bbc_style() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/high_in_blood_2.png"))
+
+#interactive plot
+
+HB <- ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+ggplotly(HB, tooltip = "sample")
+
+```
+
+# Summarising -- Low in all Promoters
+```{r summarise promoter counts}
+
+bp.distance <- c(-5750, -5250, -4750, -4250, -3750, -3250, -2750, -2250, -1750, -1250, -750, -250,
+  250, 750, 1250, 1750, 2250, 2750, 3250, 3750, 4250, 4750, 5250, 5750)
+
+prmtr.means <- as_tibble(list(position = bp.distance))
+for(i in 1:length(all_samples)){
+  sample.counts <- readRDS(paste0(output, "/promoter_patterns/pro_counts/low_in_all/", all_samples[i], ".RDS"))
+  sample.means <- colMeans(sample.counts) %>%
+    as_tibble() %>%
+    add_column(position = bp.distance)
+  colnames(sample.means) <- c(all_samples[i], "position")
+  prmtr.means <- inner_join(prmtr.means, sample.means)
+}
+
+prmtr.means <- prmtr.means %>% pivot_longer(cols = 2:ncol(prmtr.means),
+                                            names_to= "sample",
+                                            values_to = "ratio")
+
+prmtr.means <- inner_join(prmtr.means, sample_info, join_by(sample == sample_id))
+ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/low_in_all.png"))
+
+#prettier
+library(bbplot)
+
+prmtr.means <- prmtr.means %>% mutate(sc.ratio = scale(ratio))
+ggplot(prmtr.means, aes(position, sc.ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~group) +
+  bbc_style() +
+  theme(legend.position = "none")
+ggsave(paste0(output, "/promoter_patterns/pro_counts/plots/low_in_all_2.png"))
+
+#interactive plot
+
+LA <- ggplot(prmtr.means, aes(position, ratio, color = sample)) +
+  geom_line() +
+  facet_wrap(~ group) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+ggplotly(LA, tooltip = "sample")
+
+```
+
+
+It would be interesting to see if ATACseq scores show the same pattern if treated the same way. Can't remember how big ATACseq bins are, should double check
+
+# Clustering
+Clustering into 2 groups, hopefully open/closed promoters, where open promoters have increased ratio at TSS and closed promoters are more flat. Testing several approaches on how to categorise open vs closed
+ - By high ratio
+  - Tests which cluster has the higher ratio. Higher ratio cluster gets assigned as "open"
+ - By proportion
+  - tests which cluster has an increased ratio at the TSS compared to the edge - higher center = open
+  - not sure how well this works
+ - By smaller quantity
+  - In general, you would expect a smaller number of genes in a sample to be "open" than "closed",
+  - This just assigns the cluster with the smaller number of genes as "open"
+  
+Note from the future: All of these assume that kmeans is clustering into open/closed based on the increased ratio at the TSS. I now believe that the clustering is based on other factors including copy number changes.
+Looking at the frag patterns of individual promoters, I believe that most individual regions do not have enough coverage to show any pattern, so clustering in this way is probably not useful.
+
+To do: remove chr6 MHC region, see what happens.
+  
+
+## By ratio
+```{r cluster promoters}
+#function clusters promoters, and returns a vector of the ids of open promoters
+
+get_open_genes_by_high_ratio <- function(id, df){
+  df.scaled <- scale(df)
+  set.seed(100)
+  clusters <- kmeans(df.scaled, centers = 2, nstart = 30)
+  png(file=paste0(output, "/promoter_patterns/plots/all_promoters/visualise_clusters_with_fviz/", id, ".png"))
+  p <- fviz_cluster(clusters, data = df.scaled)
+  print(p)
+  dev.off()
+  #separate into open/closed
+  # open should be have higher ratio  (in theory)
+  cl.means <-  rowMeans(clusters$centers)
+  open.cl <- ifelse(cl.means[1] > cl.means[2], 1, 2)
+  open.cl <- unname(open.cl)
+  open.promoters <- which(clusters$cluster == open.cl)
+  open.promoters <- names(open.promoters)
+}
+
+```
+
+## By proportion
+also trying to separate clusters by the shape of the graph
+(ie. high ratio @ transcription start site, low ratio at edges for "open" promoters)
+
+```{r}
+get_open_genes_by_proportion <- function(id, df){
+  df.scaled <- scale(df)
+  set.seed(100)
+  clusters <- kmeans(df.scaled, centers = 2, nstart = 30)
+  
+  #separate into open/closed
+
+  cl1 <- tibble(position = bp.distance, cluster_center = clusters$centers[1,])
+  
+  cl1_pl <- ggplot(cl1, aes(position, cluster_center)) +
+    geom_line() +
+    ggtitle(id)
+  
+  ggsave(paste0(output, "/promoter_patterns/plots/all_promoters/cluster_plots/", id, ".cluster1.png"),
+         plot = cl1_pl, device = "png")
+
+  cl2 <- tibble(position = bp.distance, cluster_center = clusters$centers[2,])
+  cl2_pl <- ggplot(cl2, aes(position, cluster_center)) +
+    geom_line() +
+    ggtitle(id)
+    
+  ggsave(paste0(output, "/promoter_patterns/plots/all_promoters/cluster_plots/", id, ".cluster2.png"),
+         plot = cl2_pl, device = "png")
+  
+  edge1 <- mean(c(clusters$centers[1,1], clusters$centers[1,24]))
+  middle1 <- mean(c(clusters$centers[1,12], clusters$centers[1,13]))
+  diff1 <- middle1-edge1
+
+  edge2 <- mean(c(clusters$centers[2,1], clusters$centers[2,24]))
+  middle2 <- mean(c(clusters$centers[2,12], clusters$centers[2,13]))
+  diff2 <- middle2-edge2
+
+  open.cl <- ifelse(diff1 > diff2, 1, 2)
+  
+  open.cl <- unname(open.cl)
+  open.promoters <- which(clusters$cluster == open.cl)
+  open.promoters <- names(open.promoters)
+}
+
+
+```
+
+
+## Smallest Quantity
+You would expect there to a smaller amount of "open" vs "closed" promoters
+```{r}
+get_open_genes_by_smallest_quant <- function(id, df){
+  df.scaled <- scale(df)
+  set.seed(100)
+  clusters <- kmeans(df.scaled, centers = 2, nstart = 30)
+  cl1_number <- which(clusters$cluster == 1) %>% length()
+  cl2_number <- which(clusters$cluster == 2) %>% length()
+  
+  open.cl <- ifelse(cl1_number < cl2_number, 1, 2)
+  open.cl <- unname(open.cl)
+  open.promoters <- which(clusters$cluster == open.cl)
+  open.promoters <- names(open.promoters)
+}
+```
+
+
+
+```{r}
+# All work but come up with warning Quick-TRANSfer stage steps exceeded maximum (= 881250)
+# this might not be good - maybe  a memory issue? will run again when server is less busy.
+# Used all promoters for these
+
+for(i in all_samples){
+  print(i)
+  df <- readRDS(paste0(output, "/promoter_patterns/pro_counts/all_promoters/", i, ".RDS"))
+  open_genes <- get_open_genes_by_high_ratio(i, df)
+  write_lines(open_genes, paste0(output, "/promoter_patterns/potential_open_genes/all_promoters/byratio/", i, "byratio.txt"))
+}
+
+
+for(i in all_samples){
+  print(i)
+  df <- readRDS(paste0(output, "/promoter_patterns/pro_counts/all_promoters/", i, ".RDS"))
+  open_genes <- get_open_genes_by_proportion(i, df)
+  write_lines(open_genes, paste0(output, "/promoter_patterns/potential_open_genes/all_promoters/byprop/", i, "byprop.txt"))
+}
+
+
+for(i in all_samples){
+  print(i)
+  df <- readRDS(paste0(output, "/promoter_patterns/pro_counts/all_promoters/", i, ".RDS"))
+  open_genes <- get_open_genes_by_smallest_quant(i, df)
+  write_lines(open_genes, paste0(output, "/promoter_patterns/potential_open_genes/all_promoters/byquant/", i, ".byquant.txt"))
+}
+
+```
+
+
+
+# Analyse "open" genes
+
+## high ratio
+
+```{r}
+all_open_genes <- vector("list", length(all_samples))
+count <- 1
+for(i in all_samples){
+  sample_open_genes <- read_lines(paste0(output,
+                                       "/promoter_patterns/potential_open_genes/all_promoters/byratio/",
+                                       i, "byratio.txt"))
+  all_open_genes[[count]] <- sample_open_genes
+  names(all_open_genes)[count] <- i
+  count <- count +1
+}
+
+
+```
+
+
+```{r}
+
+high_gc_open_genes <- all_open_genes[which(sample_info$group == "high_gc")]
+low_gc_open_genes <- all_open_genes[which(sample_info$group == "low_gc")]
+delfi_gc_open_genes <- all_open_genes[which(sample_info$group == "delfi_gc")]
+healthy_open_genes <- all_open_genes[which(sample_info$group == "healthy")]
+
+
+sorted_high_gc <- unlist(high_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_low_gc <- unlist(low_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_delfi_gc <- unlist(delfi_gc_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+sorted_healthy <- unlist(healthy_open_genes) %>% table() %>%
+  sort(decreasing = TRUE)
+
+n_high_gc_samples <- which(sample_info$group == "high_gc") %>% length()
+n_low_gc_samples <- which(sample_info$group == "low_gc") %>% length()
+n_delfi_gc_samples  <- which(sample_info$group == "delfi_gc") %>% length()
+n_healthy_samples <-  which(sample_info$group == "healthy") %>% length()
+
+
+
+```
+
+```{r}
+sorted_all_open_genes <- unlist(all_open_genes) %>% table() %>% sort(decreasing = TRUE)
+prmtrs_to_test <- names(sorted_all_open_genes[sorted_all_open_genes > 3])
+
+```
+
+
+
+```{r}
+prmtr_yes_no <- vector("list", length(prmtrs_to_test))
+count <- 1
+for(i in prmtrs_to_test){
+  high_gc_count <- sorted_high_gc[which(names(sorted_high_gc) == i)]
+  high_gc_count <- ifelse(length(high_gc_count) > 0, high_gc_count, 0)
+  low_gc_count <- sorted_low_gc[which(names(sorted_low_gc) == i)]
+  low_gc_count <- ifelse(length(low_gc_count) > 0, low_gc_count, 0)
+  delfi_gc_count <- sorted_delfi_gc[which(names(sorted_delfi_gc) == i)]
+  delfi_gc_count <- ifelse(length(delfi_gc_count) > 0, delfi_gc_count, 0)
+  healthy_count <- sorted_healthy[which(names(sorted_healthy) == i)]
+  healthy_count <- ifelse(length(healthy_count) > 0, healthy_count, 0)
+  
+  yes.list <- c(high_gc_count,
+                low_gc_count,
+                delfi_gc_count,
+                healthy_count)
+ 
+  no.list <- c(n_high_gc_samples - high_gc_count,
+               n_low_gc_samples - low_gc_count,
+               n_delfi_gc_samples - delfi_gc_count,
+               n_healthy_samples - healthy_count)
+  
+  prmtr_yes_no[[count]] <- tibble(yes = yes.list, no = no.list) %>% as.matrix()
+  rownames(prmtr_yes_no[[count]]) <- c("high_gc", "low_gc", "delfi_gc", "healthy")
+  names(prmtr_yes_no)[count] <- i
+  
+  count <- count + 1
+}
+
+```
+
+```{r}
+
+results <- tibble(gene = NA, p.value = NA)
+for(i in 1:length(prmtr_yes_no)){
+  gene <- names(prmtr_yes_no)[i]
+  data <- prmtr_yes_no[[i]]
+  test <- chisq.test(data)
+  gene.results <- tibble(gene = gene, p.value = test$p.value)
+  results <- bind_rows(results, gene.results)
+}
+results <- results[-1,]
+p.adj <- p.adjust(results$p.value, method = p.adjust.methods, n =length(results$p.value))
+results <- mutate(results, p.adj = p.adj)
+results
+
+sig_results <- results[results$p.adj < 0.05,]$gene
+sig_results
+write_lines(sig_results, paste0(output, "/promoter_patterns/high_gc_sig_open_genes/all_promoters/high_gc_sig_open_genes_byratio.txt"))
+output
+prmtr_yes_no[names(prmtr_yes_no) %in% sig_results]
+
+healthy_enriched <- sig_results[1:7]
+stad_enriched <- sig_results[8:length(sig_results)]
+
+```
+
+Write out enriched genes and get counts. Check if counts differ between BRCA and COAD in BRCA enriched genes.
+
+
+Take genes and convert to a tsv file that can be used to create a phenogram using http://visualization.ritchielab.org/phenograms/plot
+Remember to set to hg19.
+To make colours the same on the graph/remove legend change "phenotype" column so that all values are the same.
+
+
+```{r}
+genes_to_phenogram_bm <- function(gene_list){
+  mart <- useMart("ensembl")
+  ds <- useDataset(dataset = "hsapiens_gene_ensembl", mart = mart)
+  getBM(attributes = c("chromosome_name", "start_position",
+                     "end_position", "ensembl_gene_id", "hgnc_symbol"),
+        filters ="hgnc_symbol",
+        values = gene_list,
+        mart = ds) -> bm
+  print(bm)
+  bm2 <- bm %>% filter(substr(chromosome_name, 1,3) != "CHR") %>%
+  mutate(seqnames = paste0("chr", chromosome_name),
+         start = start_position,
+         end = end_position) %>%
+  dplyr::select(-c("chromosome_name", "start_position",
+                   "end_position", "ensembl_gene_id")) %>%
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+  
+  # convert to hg19
+  ch.path <- system.file(package = "liftOver", "extdata", "hg38ToHg19.over.chain")
+  ch <- import.chain(ch.path)
+  bm2 <- unlist(liftOver(bm2, ch))
+  bm2 <- bm2[!duplicated(bm2$hgnc_symbol)]
+  
+  phen_table <- as_tibble(bm2) %>%
+  mutate(seqnames = as.character(seqnames),
+         chr = str_sub(seqnames, 4, nchar(seqnames))) %>%
+  dplyr::select(c(chr, start, hgnc_symbol))
+  colnames(phen_table) <- c("chrom", "pos", "phenotype")
+  return(phen_table)
+}
+```
+
+
+```{r}
+
+stad_enriched_genes_by_ratio <- genes_to_phenogram_bm(stad_enriched) # sometimes can't connect, just wait a few hours and try again.
+
+write_tsv(stad_enriched_genes_by_ratio,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/all_promoters/stad_enriched_by_ratio.tsv"))
+length(healthy_enriched)
+
+healthy_enriched_genes_by_ratio <- genes_to_phenogram_bm(healthy_enriched)
+
+nrow(healthy_enriched_genes_by_ratio)
+write_tsv(healthy_enriched_genes_by_ratio,
+          paste0(output, "/promoter_patterns/ready_to_phenogram/all_promoters/healthy_enriched_by_ratio.tsv"))
+
+
+cat(healthy_enriched)
+```
