@@ -1,0 +1,7 @@
+cat ~/Documents/GC_DELFIproject/EGAdata/healthy_files.txt | while read line
+do
+cd ./${line}
+bamname=$(ls *bam)
+echo ${line}/${bamname}
+cd ../
+done
