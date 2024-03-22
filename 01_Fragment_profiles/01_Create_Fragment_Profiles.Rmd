@@ -34,7 +34,7 @@ To run this script you will need:
   - a csv file containing:
     * sample_id
     * bam_path (i.e. path/to/bam)
-    * group (eg. high_crc, low_crc, healthy)
+    * group (eg. high_gc, low_gc, healthy, delfi_gc)
   - output folder path
 
 
