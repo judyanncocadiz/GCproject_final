@@ -52,7 +52,7 @@ library(GenomicRanges)
 
 ```{r enter sample info}
 #sample_info <- "path/to/sample_data.tsv"
-sample_info <- "~/Documents/GCproject_final/data/bams/all_sample_info2.csv"
+sample_info <- "~/Documents/GCproject_final/data/bams/all_sample_info.csv"
 #output <- "path/to/output"
 output <-  "~/Documents/GCproject_final/output/fragment_profiles"
 #path to regions of genome to filter out eg. centromeres, low map regions
@@ -210,7 +210,7 @@ for(i in samples){
               panel.grid.minor = element_blank())
   
 ggsave(plot = fp,
-       filename = paste0(output, "/graphs2/", i, ".fp.png"),
+       filename = paste0(output, "/graphs/", i, ".fp.png"),
        device = "png",
        width = 12, height = 1.5, units = "in")
   
@@ -258,9 +258,9 @@ combine_fps <- function(sample.ids, mean.colour, output, group.name, scale = FAL
     bind_rows() %>% dplyr::select(id, everything())
   
   if(scale == FALSE){
-    saveRDS(combined.counts, paste0(output, "/counts3/", group.name, ".df.RDS"))
+    saveRDS(combined.counts, paste0(output, "/counts/", group.name, ".df.RDS"))
   } else {
-    saveRDS(combined.counts, paste0(output, "/counts3/", group.name, ".df.scaled.RDS"))
+    saveRDS(combined.counts, paste0(output, "/counts/", group.name, ".df.scaled.RDS"))
   }
   
   # get average
@@ -297,7 +297,7 @@ combine_fps <- function(sample.ids, mean.colour, output, group.name, scale = FAL
     combined.fp.plot + geom_line(data = bin.averages,
                              aes(start, mean.ratio),
                              size = 0.5, color = mean.colour) + ylim(0,0.6)
-    ggsave(filename = paste0(output, "/graphs4/", group.name, ".unscaled.fp.png"),
+    ggsave(filename = paste0(output, "/graphs/", group.name, ".unscaled.fp.png"),
            device = "png",
            width = 12,
            height = 1.5,
@@ -306,7 +306,7 @@ combine_fps <- function(sample.ids, mean.colour, output, group.name, scale = FAL
     combined.fp.plot + geom_line(data = bin.averages,
                              aes(start, mean.ratio),
                              size = 0.5, color = mean.colour) + ylim(-5,15)
-    ggsave(filename = paste0(output, "/graphs4/", group.name, ".scaled.fp.png"),
+    ggsave(filename = paste0(output, "/graphs/", group.name, ".scaled.fp.png"),
            device = "png",
            width = 12,
            height = 1.5,

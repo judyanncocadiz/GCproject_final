@@ -11,9 +11,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Introduction
 
-This script is written to produce graphs for the fragmentation profiles and size distribution of the cfDNA of cancer patients, with samples taken at two timepoints: one where they have a high tumour load, and one where they have a low tumour load.
+This script is written to produce graphs for the fragmentation profiles and size distribution of the cfDNA of cancer patients, with samples taken at two timepoints: one where they have a high tumour load (pre-surgery), and one where they have a low tumour load (post-surgery).
 
-The required input is the path to the high/low bamfiles. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+The required input is the path to the pre/post bamfiles. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
 
 First need to load packages. If you have never used these packages before you will also need to install them.
 

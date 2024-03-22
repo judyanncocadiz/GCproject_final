@@ -1,6 +1,6 @@
 ---
 title: "Generate_Fragment_Profiles"
-author: "Alice McAtamney"
+author: "Judy Ann Cocadiz"
 date: "8/24/2021"
 output: html_document
 ---
@@ -29,14 +29,13 @@ knitr::opts_chunk$set(echo = TRUE)
 
 This is a redo of my initial scripts ensuring that I can produce fragment profiles for all samples and put them all together. It will also save the files that are useful for identifying outliers in the next part of the project.
 
-This script requires a folder containing bam files with sequencing data and a text file located inside the folder listing each of the bam files. If you want the files to be separated by high/low ctDNA the files should be named as follows:
+This script requires a folder containing bam files with sequencing data and a text file located inside the folder listing each of the bam files. If you want the files to be separated by pre/post-surgery ctDNA, the files should be named as follows:
 
-* sample_name-[H/L]-[....].bam
+* sample_name[pre/post]-[....].bam
 
 For example:
 
-* M011-H-T2.bam
-
+* GC110pre.merged.bam
 
 
 ```{r Setup}
