@@ -1,0 +1,411 @@
+---
+title: "Fragment Profiles"
+author: "Judy Ann Cocadiz"
+date: "07/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This script is written to produce graphs for the fragmentation profiles and size distribution of the cfDNA of cancer patients, with samples taken at two timepoints: one where they have a high tumour load, and one where they have a low tumour load.
+
+The required input is the path to the high/low bamfiles. When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+First need to load packages. If you have never used these packages before you will also need to install them.
+
+```{r load packages}
+library(here)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(GenomicAlignments)
+library(biovizBase)
+library(tidyverse)
+```
+
+## Including Plots
+
+Use the bam files we sorted and merged. Specify the path to those files using the "here" package. Note that the readGAlignmentPairs step tends to take a while (~5 mins per file). This usually comes up with a warning that some of the alignments were dumped due to ambiguous pairing- usually it is only a small proportion of reads, so it is safe to continue.
+
+```{r load bam files}
+
+high.path <- here("fragment_data", "merged_bams", "GC121.pre.merged.bam")
+low.path <- here("fragment_data", "merged_bams", "GC121.post.merged.bam")
+
+#loading as GAlignmentPairs objects
+param <- ScanBamParam(flag = scanBamFlag(isDuplicate = FALSE, isSecondaryAlignment = FALSE, isUnmappedQuery = FALSE), mapqFilter = 30)
+
+High <- readGAlignmentPairs(high.path, param = param)
+Low <- readGAlignmentPairs(low.path, param = param)
+
+#converting to GRanges
+grH <- granges(keepSeqlevels(High, paste0("chr", 1:22), pruning.mode="coarse"),
+               on.discordant.seqnames="drop")
+grL <- granges(keepSeqlevels(Low, paste0("chr", 1:22), pruning.mode="coarse"),
+               on.discordant.seqnames="drop")
+```
+
+The fragmentation profile may be biased by the GC content of the sample, so the authors of DELFI also took this into account. So far in my analysis I have not corrected for GC content, but I am including it anyway in case we want to correct for GC bias later.
+
+Note: GCcontent step takes a while (~ 4 mins per file)
+
+```{r gc content}
+#gcsH <- GCcontent(Hsapiens, unstrand(grH))
+#grH$gc <- gcsH
+
+#gcsL <- GCcontent(Hsapiens, unstrand(grL))
+#grL$gc <- gcsL
+```
+
+## Filter files
+
+The bamfiles contain data for centromeres and telomeres and highly repetitive regions, therefore we should filter extreme fragment lengths and regions that are unmappable eg. Dukes blacklisted regions. I used the script written by Cristiano et al (2019) to obtain regions that we want to filter out. This script is saved under:
+
+```{r}
+#here("scripts", "og_delfi_paper_scripts", "delfi_scripts-master", "00-filtered_regions.r")
+```
+
+but I have saved the filters object obtained by running that script under:
+
+```{r}
+#here("fragment_data", "filters.hg19.rda")
+```
+
+
+```{r filter bams}
+
+#Remove fragments with extreme lengths
+
+#High
+w.allH <- width(grH)
+q.allH <- quantile(w.allH, c(0.001, 0.999))
+#q.all <- width[width < 10000]
+grH <- grH[which(w.allH > q.allH[1] & w.allH < q.allH[2])]
+
+#Low
+w.allL <- width(grL)
+q.allL <- quantile(w.allL, c(0.001, 0.999))
+grL <- grL[which(w.allL > q.allL[1] & w.allL < q.allL[2])]
+
+#Remove blacklisted regions
+load(here("fragment_data", "filters.hg19.rda"))
+grH.clean <- grH[-queryHits(findOverlaps(grH, filters.hg19))]
+grL.clean <- grL[-queryHits(findOverlaps(grL, filters.hg19))]
+
+#Save Cleaned Data
+saveRDS(grH.clean, here("output", "clean.grs", "GC121preH.gr.clean.rds"))
+saveRDS(grL.clean, here("output", "clean.grs", "GC121postL.gr.clean.rds"))
+
+```
+
+## Plot Fragment Distribution
+
+Now we have all the information to plot out the distribution of fragment sizes for each sample. 
+
+```{r Plot fragment density}
+
+
+#Putting fragment length data into dataframes, so it is easier to work with
+H <- data.frame(length = w.allH)
+L <- data.frame(length = w.allL)
+
+#Function to get modal fragment length, so we can include that in graph
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+#Density plot
+dp <- ggplot(H, aes(x = length)) +
+  geom_density(color = "red") +
+  geom_density(data = L, aes(x = w.allL), color = "blue") +
+  geom_vline(xintercept = Mode(w.allH), size = 0.2) +
+  geom_vline(xintercept = Mode(w.allL), size = 0.2)
+
+dp
+
+#if you wanted to save graph
+ggsave(plot = dp, filename = here("graphs2/GC121_dp.png"), device = "png", width = 9.05, height = 5.55, units = "in")
+
+```
+
+
+## Generate Fragmentation Profile
+
+Next we want to split our data into bins of 5Mbp, and count the number of short (100-150) and long (150-220) fragments in each bin, so we can generate the fragment profiles for each sample.
+
+
+The DELFI method only analyses reads of lengths 100-220bp, so we want to filter out reads that fall outside of those lengths.
+
+```{r}
+
+
+#Filter by read length
+w.allH <- width(grH.clean)
+fragmentsH <- grH.clean[which(w.allH >= 100 & w.allH <= 220)]
+wH <- width(fragmentsH)
+
+w.allL <- width(grL.clean)
+fragmentsL <- grL.clean[which(w.allL >= 100 & w.allL <= 220)]
+wL <- width(fragmentsL)
+
+```
+
+
+Now we need to create a blank GRanges object, where the hg19 genome is split into 5Mbp bins, this gives us a scaffold that we can use to separate our own reads into these bins.
+
+```{r Creating bins}
+
+bins <- tileGenome(seqinfo(Hsapiens), tilewidth = 5000000, cut.last.tile.in.chrom = TRUE)
+seqnames(bins) #note that bins has data for a bunch of alternate chromosomes from UCSC
+
+#filter out alt chrms
+chrms <- paste0("chr", 1:22)
+bins <- bins[seqnames(bins) %in% chrms]
+
+```
+
+
+
+Then we split up our reads into a list of GRanges objects, each with reads of one fragment size. 
+This list can be used to count the number of fragments of each length contained in each bin. Then we can put those counts into a matrix, so it is easier to work with.
+
+In other words, this code block will take the empty GRanges object defining the location of each bin, and the GRanges objects containing your reads, and create a matrix storing the frequency of every fragment length between 100-220bp for each bin.
+
+
+```{r count fragments}
+
+#split frags into list of each frag size
+frag.list.H <- split(fragmentsH, wH)
+
+#count fragments of each length for each bin
+counts.H <- sapply(frag.list.H, function(x) countOverlaps(bins, x)) 
+
+#put counts into matrix
+if(min(wH) > 100) {
+  m0 <- matrix(0, ncol=min(wH) - 100, nrow=nrow(counts.H),
+               dimnames=list(rownames(counts.H), 100:(min(wH)-1)))
+  counts.H <- cbind(m0, counts.H)
+}
+
+
+
+##repeat for Low sample
+frag.list.L <- split(fragmentsL, wL)
+
+counts.L <- sapply(frag.list.L, function(x) countOverlaps(bins, x))
+
+if(min(wL) > 100) {
+  m0 <- matrix(0, ncol=min(wL) - 100, nrow=nrow(counts.L),
+               dimnames=list(rownames(counts.L), 100:(min(wL)-1)))
+  counts.L <- cbind(m0, counts.L)
+}
+
+
+
+```
+
+Complicated part is over, now we can get some stats for this data
+
+```{r get stats}
+
+
+modes.H <- Mode(wH)
+medians.H <- median(wH)
+q25.H <- quantile(wH, 0.25)
+q75.H <- quantile(wH, 0.75)
+
+modes.L <- Mode(wL)
+medians.L <- median(wL)
+q25.L <- quantile(wL, 0.25)
+q75.L <- quantile(wL, 0.75)
+
+```
+
+Finally we can compile our count data into a GRanges object
+
+```{r}
+#H data
+short.H <- rowSums(counts.H[,1:51]) #adds up the number of fragments between 100-150bp for each row (each bin)
+long.H <- rowSums(counts.H[,52:121])
+ratio.H <- short.H/long.H #%>% scale()
+
+
+bins.H <- bins
+bins.H$short <- short.H
+bins.H$long <- long.H
+bins.H$ratio <- short.H/long.H
+bins.H$nfrags <- short.H+long.H
+
+bins.H$mode <- modes.H
+bins.H$mean <- round(mean(wH), 2)
+bins.H$median <- medians.H
+bins.H$quantile.25 <- q25.H
+bins.H$quantile.75 <- q75.H
+
+
+#L data
+short.L <- rowSums(counts.L[,1:51])
+long.L <- rowSums(counts.L[,52:121])
+ratio.L <- short.L/long.L #%>% scale()
+
+bins.L <- bins
+bins.L$short <- short.L
+bins.L$long <- long.L
+bins.L$ratio <- short.L/long.L
+bins.L$nfrags <- short.L+long.L
+
+bins.L$mode <- modes.L
+bins.L$mean <- round(mean(wL), 2)
+bins.L$median <- medians.L
+bins.L$quantile.25 <- q25.L
+bins.L$quantile.75 <- q75.L
+
+
+#save data
+saveRDS(bins.H, here("output", "binned.counts", "GC121preH.bins.rds"))
+saveRDS(bins.L, here("output", "binned.counts", "GC121postL.bins.rds"))
+
+```
+
+Now we can plot this data
+
+```{r fp graph 1}
+
+
+#Put data into dataframes, so it is easier to work with
+bin.df.H <- data.frame(bins.H) %>%
+  select(seqnames, start, ratio, short, long) %>%
+  filter(seqnames %in% chrms)
+
+bin.df.L <- data.frame(bins.L) %>%
+  select(seqnames, start, ratio) %>%
+  filter(seqnames %in% chrms)
+
+#Plot
+fp <- ggplot(bin.df.H, aes(start, ratio)) +
+  geom_line(size = 0.3, aes(color = "GC121pre")) +
+  geom_line(data = bin.df.L, aes(start, ratio, color = "GC121post"), size = 0.3) +
+  scale_color_manual(name = "Tumour Burden",
+                     values = c("GC121pre"="red", "GC121post"="blue"),
+                     labels = c("GC121pre", "GC121post")) +
+   facet_wrap(~seqnames) #facet_grid(.~seqnames) + save with squished coordinates
+fp
+
+```
+
+
+Some modifications need to be made to make the plot look more similar to DELFI graphs
+
+```{r fp graph 2, fig.height = 1.5, fig.width = 13}
+
+fp2 <- ggplot(bin.df.H, aes(start, ratio)) +
+  geom_line(size = 0.2, aes(color = "GC121pre")) +
+  geom_line(data = bin.df.L, aes(start, ratio, color = "GC121post"), size = 0.3) +
+  scale_color_manual(name = "Tumour Burden",
+                     values = c("GC121pre"="red", "GC121post"="blue"),
+                     labels = c("GC121pre", "GC121post")) +
+  labs(y = "Ratio") +
+  facet_grid(.~seqnames,
+             scales = "free",
+             space = "free",
+             switch = "both") +
+  scale_x_continuous(breaks = round(seq(min(bin.df.H$start), max(bin.df.H$start), by = 100000000),1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.line = element_line(color = "black"),
+        strip.background = element_rect(
+          color = "white", fill = "white"),
+        strip.placement = "outside",
+        strip.text.x.bottom = element_text(angle = 90),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+fp2
+#Save plot
+ggsave(filename = here("graphs2", "GC121_fp.png"), plot = fp2, device = "png", width = 12, height = 1.5, units = "in")
+
+
+```
+
+
+
+## GC Bias Correction
+
+This code block is optional, but I've put it here to show the fragment profile if it is corrected for GC bias
+
+```{r Add GC content}
+
+
+### GC coverage model ###
+#gc.correct <- function(coverage, bias) {
+ # i <- seq(min(bias, na.rm=TRUE), max(bias, na.rm=TRUE), by = 0.001)
+ # coverage.trend <- loess(coverage ~ bias)
+ # coverage.model <- loess(predict(coverage.trend, i) ~ i)
+ # coverage.pred <- predict(coverage.model, bias)
+ # coverage.corrected <- coverage - coverage.pred + median(coverage)
+#}
+
+
+## High ##
+
+
+#gets mean GC content for each bin
+#olaps.H <- findOverlaps(fragmentsH, bins)
+#bin.list.H <- split(fragmentsH[queryHits(olaps.H)], subjectHits(olaps.H))
+#bingc.H <- rep(NA, length(bin.list.H))
+#bingc.H[unique(subjectHits(olaps.H))] <- sapply(bin.list.H, function(x) mean(x$gc))
+#results in vector of average GC content for each bin
+
+
+# Adds GC corrected data to results
+#bins.H$frag.gc <- bingc.H
+#short.corrected.H=gc.correct(short.H, bingc.H)
+#long.corrected.H=gc.correct(long.H, bingc.H)
+#nfrags.corrected.H=gc.correct(short.H+long.H, bingc.H)
+#ratio.corrected.H=short.corrected.H/long.corrected.H
+#bins.H$ratio.corrected <- ratio.corrected.H
+
+
+## Low ##
+
+#olaps.L <- findOverlaps(fragmentsL, bins)
+#bin.list.L <- split(fragmentsL[queryHits(olaps.L)], subjectHits(olaps.L))
+#bingc.L <- rep(NA, length(bin.list.L))
+#bingc.L[unique(subjectHits(olaps.L))] <- sapply(bin.list.L, function(x) mean(x$gc))
+
+#bins.L$frag.gc <- bingc.L
+#short.corrected.L=gc.correct(short.L, bingc.L)
+#long.corrected.L=gc.correct(long.L, bingc.L)
+#nfrags.corrected.L=gc.correct(short.L+long.L, bingc.L)
+#ratio.corrected.L=short.corrected.L/long.corrected.L
+#bins.L$ratio.corrected <- ratio.corrected.L
+
+
+# Graph this data
+
+#bin.df.H <- data.frame(bins.H) %>%
+  #select(seqnames, start, ratio, ratio.corrected, short, long) %>%
+  #filter(seqnames %in% chrms)
+
+#bin.df.L <- data.frame(bins.L) %>%
+  #select(seqnames, start, ratio, ratio.corrected) %>%
+  #filter(seqnames %in% chrms)
+
+
+
+#fp.gc <- ggplot(bin.df.H, aes(start, ratio.corrected)) +
+  #geom_line(size = 0.3, aes(color = "High")) +
+  #geom_line(data = bin.df.L, aes(start, ratio.corrected, color = "Low"), size = 0.3) +
+  #scale_color_manual(name = "Tumour Burden",
+   #                  values = c("High"="red", "Low"="blue"),
+    #                 labels = c("High", "Low")) +
+  #facet_wrap(~seqnames, strip.position = "bottom")
+#fp.gc
+
+```
+

@@ -1,0 +1,409 @@
+---
+title: "Generate_Fragment_Profiles"
+author: "Alice McAtamney"
+date: "8/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Summary
+
+* __Introduction:__*
++ Quick paragraph on logic behind this script
+
+* __Setup:__*
++ Loads packages
+
+
+* __Generate Fragment Profiles: __ *
++ Function to produce fragment profiles
++ Get vector of the sample names
++ Loop to produce fragment profile for each sample
++ Function to produce combined graph of fragment profiles
++ Creates combined graph for each sample
+
+
+## Introduction
+
+This is a redo of my initial scripts ensuring that I can produce fragment profiles for all samples and put them all together. It will also save the files that are useful for identifying outliers in the next part of the project.
+
+This script requires a folder containing bam files with sequencing data and a text file located inside the folder listing each of the bam files. If you want the files to be separated by high/low ctDNA the files should be named as follows:
+
+* sample_name-[H/L]-[....].bam
+
+For example:
+
+* M011-H-T2.bam
+
+
+
+```{r Setup}
+library(here)
+library(GenomicAlignments)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+library(GenomicRanges)
+```
+
+
+
+## Generate fragment profiles
+
+```{r Fragment Profile Function}
+
+get.frag.profile <- function(path, sample, save_fp_graph = FALSE, save_density_plot = FALSE){
+  print("Loading bam as GRanges ... will take 5-10 mins")
+  param <- ScanBamParam(flag = scanBamFlag(isDuplicate = FALSE,
+                                           isSecondaryAlignment = FALSE,
+                                           isUnmappedQuery = FALSE),
+                        mapqFilter = 30)
+  
+  
+  gp <- readGAlignmentPairs(path, param = param)
+  gr <- granges(keepSeqlevels(gp, paste0("chr", 1:22), pruning.mode="coarse"),
+                on.discordant.seqnames="drop")
+  
+  saveRDS(gr, here("fragment_output", "fp_counts", paste0(sample, ".gr.RDS")))
+  
+  print("Getting Fragment Length Density")
+  w.all <- width(gr)
+  q.all <- quantile(w.all, c(0.001, 0.999))
+  gr <- gr[which(w.all > q.all[1] & w.all < q.all[2])]
+  w.all <- width(gr)
+  
+  
+  load(here("fragment_data", "filters.hg19.rda"))
+  gr.clean <- gr[-queryHits(findOverlaps(gr, filters.hg19))]
+  
+  lengths <- data.frame(length = w.all)
+  
+  Mode <- function(x) {
+    ux <- unique(x)
+    ux[which.max(tabulate(match(x, ux)))]
+  }
+  
+  #Density plot
+  if(save_density_plot == TRUE){
+    dp <- ggplot(lengths, aes(x = length)) +
+    geom_density() +
+    geom_vline(xintercept = Mode(w.all), size = 0.2)
+    ggsave(filename = here("fragment_output", paste0(sample, "_dp.png")), plot = dp, device = "png")
+  }
+  
+  
+  print("Filtering")
+  w.all <- width(gr.clean)
+  fragments <- gr.clean[which(w.all >= 100 & w.all <= 220)]
+  w <- width(fragments)
+  
+  
+  bins <- tileGenome(seqinfo(Hsapiens),
+                     tilewidth = 5000000,
+                     cut.last.tile.in.chrom = TRUE)
+  #filter out alt chrms
+  chrms <- paste0("chr", 1:22)
+  bins <- bins[seqnames(bins) %in% chrms]
+  
+  
+  print("Counting Fragments in each bin")
+  frag.list <- split(fragments, w)
+  #count fragments of each length for each bin
+  counts <- sapply(frag.list, function(x) countOverlaps(bins, x)) 
+  
+  #put counts into matrix
+  if(min(w) > 100) {
+    m0 <- matrix(0, ncol=min(w) - 100, nrow=nrow(counts),
+                 dimnames=list(rownames(counts), 100:(min(w)-1)))
+    counts <- cbind(m0, counts)
+  }
+  
+  
+  modes <- Mode(w)
+  medians <- median(w)
+  q25 <- quantile(w, 0.25)
+  q75 <- quantile(w, 0.75)
+  
+  short <- rowSums(counts[,1:51]) #adds up number of fragments between 100-150bp for each row/bin
+  long <- rowSums(counts[,52:121])
+  ratio <- short/long
+  
+  bins$short <- short
+  bins$long <- long
+  bins$ratio <- short/long
+  bins$nfrags <- short+long
+  
+  bins$mode <- modes
+  bins$mean <- round(mean(w), 2)
+  bins$median <- medians
+  bins$quantile.25 <- q25
+  bins$quantile.75 <- q75
+  
+  bin.df <- data.frame(bins) %>%
+    dplyr::select(seqnames, start, ratio, short, long) %>%
+    filter(seqnames %in% chrms)
+  
+  saveRDS(bin.df, here("fragment_output", "fp_counts", paste0(sample, ".count.df.RDS")))
+  
+  if(save_fp_graph == TRUE){
+    print("Plotting Fragment Profile")
+    fp <- ggplot(bin.df, aes(start, ratio)) +
+      geom_line(size = 0.2) +
+      labs(y = "Ratio") +
+      facet_grid(.~seqnames,
+               scales = "free",
+               space = "free",
+               switch = "both") +
+      scale_x_continuous(breaks = round(seq(min(bin.df$start),
+                                            max(bin.df$start),
+                                            by = 100000000),1)) +
+      theme_minimal() +
+      theme(axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            axis.title.x = element_blank(),
+            axis.line = element_line(color = "black"),
+            strip.background = element_rect(
+              color = "white", fill = "white"),
+            strip.placement = "outside",
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank())
+  
+  
+     ggsave(plot = fp,
+            filename = here("fragment_output", "graphs", paste0(sample, "_fp.png")),
+            device = "png")
+  }
+  
+  
+}
+
+
+```
+
+
+```{r Prepare bam file names CRC}
+controls <- FALSE
+bam.file.names <- read_tsv(here("fragment_data",
+                                "merged_bams",
+                                "samples.txt"),
+                           col_names = FALSE)
+bam.file.names
+
+sample.ids <- bam.file.names %>%
+  separate(col = X1,
+           into = c("id", NA, NA),
+           sep = "\\.")
+sample.ids
+
+sample.ids <- sample.ids$id
+bam.file.names <- bam.file.names$X1
+
+sample.ids
+```
+
+```{r prep bam file names controls}
+#ONLY RUN IF YOU WANT TO ANALYSE CONTROLS!
+controls <- TRUE
+
+sample.ids <- read_tsv("~/Documents/GC_DELFIproject/EGAdata/healthy_files.txt", col_names = FALSE)
+#EGAF00002727544 nothing in here
+#EGAF00002727161 weird files in here
+sample.ids
+
+
+sample.ids <- filter(sample.ids, X1 != "EGAF00002727544" & X1 != "EGAF00002727161")
+sample.ids <- sample.ids$X1
+sample.ids
+bam.file.names <- read_tsv("~/Documents/GC_DELFIproject/EGAdata/control.bam.files.txt", col_names = FALSE)
+bam.file.names <- bam.file.names$X1
+
+paths <- paste0("~/Documents/GC_DELFIproject/EGAdata/healthy_samples/", bam.file.names)
+
+
+```
+
+
+
+```{r generate fragment profiles}
+
+for(i in 1:length(bam.file.names)){
+  if(controls == FALSE){
+    print("these are not controls")
+    file.path <- paste0(here("fragment_data", "merged_bams"), "/", bam.file.names[i])
+  } else if(controls == TRUE){
+    print("these are controls")
+    file.path <- paths[i]
+  } else {
+    print("please set controls to true/false")
+  }
+  id <- sample.ids[i]
+  get.frag.profile(file.path, id)
+}
+
+
+```
+
+The script below will create a graph for all of the samples provided in the list as well as the mean value in each bin. Cristiano et al present their results as scaled to stdev of 1 -- allows better comparison of where this variation is happening, so I have included option to scale the ratio.
+
+Writing this as a function.
+Function requires
+* character vector of sample ids
+* corresponding count data in "output/fp_counts" named [id].count.df.RDS
+* colour you want the mean line to be (as a character)
+* whatever you want the outputs to be saved as (as a character)
+
+```{r function combine graphs}
+
+combine_fps <- function(sample.ids, mean.colour, output.name, scale = FALSE){
+ 
+  # combine data into one tibble
+  paths <- paste0(here("fragment_output", "fp_counts"), "/", sample.ids, ".count.df.RDS")
+  bins.list <- lapply(paths, readRDS)
+  tib.list <- lapply(bins.list, as_tibble)
+  print(tib.list)
+  names(tib.list) <- sample.ids
+  
+  
+  if(scale == TRUE){
+    for(i in 1:length(tib.list)){
+      tib.list[[i]] <- mutate(tib.list[[i]], ratio = scale(ratio)[,1])
+    }
+  }
+  print("yes")
+  combined.counts <- map2(tib.list, names(tib.list), ~ mutate(.x, id = .y)) %>%
+    bind_rows() %>% dplyr::select(id, everything())
+  print(combined.counts)
+  
+  if(scale == FALSE){
+    saveRDS(combined.counts, here("fragment_output", paste0(output.name, ".df.RDS")))
+  } else {
+    saveRDS(combined.counts, here("fragment_output", paste0(output.name, ".df.scaled.RDS"))) 
+  }
+  
+  
+  # get average
+  bin.averages <- combined.counts %>%
+    group_by(start, seqnames) %>%
+    summarise(mean.ratio = mean(ratio))
+  
+  
+  # fragment profile ggplot theme
+  theme_fp <- theme_minimal() +
+              theme(axis.text.x = element_blank(),
+                    axis.ticks.x = element_blank(),
+                    axis.title.x = element_blank(),
+                    axis.line = element_line(color = "black"),
+                    strip.background = element_rect(color = "white", fill = "white"),
+                    strip.placement = "outside",
+                    panel.grid.major = element_blank(),
+                    panel.grid.minor = element_blank())
+  
+  combined.fp.plot <- ggplot(combined.counts, aes(start, ratio)) +
+      geom_line(aes(group = id),color = "grey18", size = 0.2) +
+      labs(y = "Ratio") +
+      facet_grid(.~seqnames,
+               scales = "free",
+               space = "free",
+               switch = "both") +
+      scale_x_continuous(breaks = round(seq(min(combined.counts$start),
+                                            max(combined.counts$start),
+                                            by = 100000000),1)) +
+      theme_fp
+  
+  combined.fp.plot + geom_line(data = bin.averages,
+                             aes(start, mean.ratio),
+                             size = 0.5, color = mean.colour)
+  
+  if(scale == FALSE){
+    ggsave(filename = here("fragment_output", "graphs", paste0(output.name, ".unscaled.fp.png")),
+         device = "png",
+         width = 12,
+         height = 1.5,
+         units = "in")
+  } else {
+    ggsave(filename = here("fragment_output", "graphs", paste0(output.name, ".scaled.fp.png")),
+         device = "png",
+         width = 12,
+         height = 1.5,
+         units = "in")
+  }
+  
+
+}
+
+
+```
+
+```{r redoing combine bins}
+count.paths
+count.paths <- paste0(here("fragment_output", "fp_counts"), "/", sample.ids, ".count.df.RDS")
+count.paths[1]
+
+count.paths
+bins.list <- list()
+for(i in 1:length(count.paths[i])){
+  print(i)
+  new.counts <- readRDS(i)
+  bins.list[i] <- new.counts
+}
+head(bins.list)
+tib.list <- lapply(bins.list, as_tibble)
+
+```
+
+
+
+```{r combine graphs}
+# For separating high/low
+high.ids <- sample.ids[substr(sample.ids, nchar(sample.ids), nchar(sample.ids)) == "e"]
+low.ids <- sample.ids[substr(sample.ids, nchar(sample.ids), nchar(sample.ids)) == "t"]
+sample.ids
+combine_fps(sample.ids = high.ids,
+            mean.colour = "red",
+            output.name = "combined.pre")
+
+combine_fps(sample.ids = low.ids,
+            mean.colour = "blue",
+            output.name = "combined.post")
+
+combine_fps(sample.ids,
+            mean.colour = "green",
+            output.name = "combined.all")
+
+# For other graphs (eg. controls)
+combine_fps(sample.ids, 
+            mean.colour = "black", 
+            output.name = "combined.ctrls")
+
+combine_fps(sample.ids = high.ids,
+            mean.colour = "red",
+            scale = TRUE,
+            output.name = "combined.pre")
+
+combine_fps(sample.ids = low.ids,
+            mean.colour = "blue",
+            scale = TRUE,
+            output.name = "combined.post")
+
+combine_fps(sample.ids,
+            mean.colour = "green",
+            scale = TRUE,
+            output.name = "combined.all")
+
+
+
+z <- list(a = c(1:3), b = c(4:6)) %>% as_tibble()
+z
+ggplot(z, aes(x = a, y = b)) +
+  geom_point()
+```
+
+
+
+
